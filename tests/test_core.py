@@ -49,6 +49,29 @@ class CoreTests(unittest.TestCase):
         self.assertEqual((episode["eid"], episode["source"]), ("apple_42", "apple"))
         self.assertEqual(episode["audioUrl"], "https://audio/x.mp3")
 
+    def test_public_xiaoyuzhou_page_parses_without_credentials(self):
+        client = PublicXiaoyuzhouClient(request_interval=0)
+        payload = {"props": {"pageProps": {"episode": {"eid": "public", "title": "公开单集"}}}}
+        client.get_bytes = lambda url: (
+            '<script id="__NEXT_DATA__" type="application/json">' +
+            __import__("json").dumps(payload, ensure_ascii=False) + '</script>').encode()
+        episode = client.get_episode("public")
+        self.assertEqual((episode["eid"], episode["source"]), ("public", "xiaoyuzhou"))
+
+    def test_cross_source_title_date_deduplication(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        first = {"eid": "xyz", "title": "同一期", "pubDate": "2026-09-01T00:00:00Z",
+                 "podcast": {"title": "Tech"}, "playCount": 99}
+        second = {"eid": "apple_1", "source": "apple", "sourceEpisodeId": "1",
+                  "title": "同一期", "pubDate": "2026-09-01T08:00:00Z",
+                  "podcast": {"title": "Tech"}, "audioUrl": "https://audio/1.mp3"}
+        self.assertTrue(upsert_episode(self.conn, first, "机器人"))
+        self.assertFalse(upsert_episode(self.conn, second, "机器人"))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM episodes").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT play_count FROM episodes").fetchone()[0], 99)
+        sources = self.conn.execute("SELECT source FROM episode_sources ORDER BY source").fetchall()
+        self.assertEqual([row[0] for row in sources], ["apple", "xiaoyuzhou"])
+
     def test_classification_import_and_content_hash_cache(self):
         install_seeds(self.conn, {"core": ["机器人"]})
         upsert_episode(self.conn, {"eid": "e1", "title": "具身数据闭环"}, "机器人")
