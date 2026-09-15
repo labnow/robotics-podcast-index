@@ -1,0 +1,20 @@
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+.pytest_cache/
+.venv/
+.robotcast/
+site-dist/
+*.zip
+outputs/
+tools/.artifact-runtime/
+*.xlsx
+*.csv
+*.ndjson
+.~lock.*
+
+# Tencent Cloud EdgeOne
+.env
+.edgeone/*
+.tef_dist/*
