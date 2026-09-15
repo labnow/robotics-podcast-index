@@ -1,5 +1,20 @@
 # Auth-less Acquisition Migration
 
+## Status
+
+Implemented on 2026-09-15. Authenticated Xiaoyuzhou code and the saved local
+refresh token were removed. Smoke tests completed successfully:
+
+- anonymous refresh of episode `69c07cc2719b26db81d9720a`;
+- Apple search for `具身智能`: 10 hits, 6 linked to historical records, 4 new;
+- one public RSS feed: 5 recent items, 2 linked, 3 new;
+- 4,077 historical records backfilled with Xiaoyuzhou source provenance;
+- faster-whisper 1.2.1 installed in the requested uv environment and
+  `large-v3-turbo` confirmed as an available model name.
+
+The model weights are intentionally not downloaded until an explicit episode
+transcription is requested.
+
 ## Decision
 
 Robotcast must not use Xiaoyuzhou account credentials or authenticated private
