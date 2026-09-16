@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=@PROJECT_DIR@
 Environment=PATH=@CONDA_DIR@:@CODEX_DIR@:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=-%h/.config/robotcast/robotcast.env
 ExecStart=@PROJECT_DIR@/scripts/main_worker.sh %i
 Nice=10
