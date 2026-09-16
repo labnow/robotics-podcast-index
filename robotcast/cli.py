@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import os
+import socket
 import sys
 from pathlib import Path
 
@@ -131,6 +133,8 @@ def parser() -> argparse.ArgumentParser:
                             help="Skip episodes longer than this duration")
     transcribe.add_argument("--request-interval", type=float, default=4.0)
     transcribe.add_argument("--directory", type=Path, default=Path(".robotcast/transcripts"))
+    transcribe.add_argument("--worker-id", default=f"{socket.gethostname()}-{os.getpid()}")
+    transcribe.add_argument("--lease-minutes", type=int, default=360)
     queue = sub.add_parser("transcription-queue",
                            help="Preview prioritized transcript-aware eligibility")
     queue.add_argument("--limit", type=int, default=20)
@@ -339,14 +343,17 @@ def main() -> None:
         print(f"Quality override recorded for {args.episode_id}")
     elif args.command == "transcribe":
         Path(".robotcast").mkdir(exist_ok=True)
-        transcription_lock = Path(".robotcast/transcribe.lock").open("w")
+        safe_worker_id = "".join(c if c.isalnum() or c in "-_" else "_"
+                                 for c in args.worker_id)
+        transcription_lock = Path(f".robotcast/transcribe-{safe_worker_id}.lock").open("w")
         try:
             fcntl.flock(transcription_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             sys.exit("Another robotcast transcription worker is already running")
         report = transcribe_public_audio(conn, args.directory, args.max_episodes,
             args.episode_id, args.model, args.device, args.fp16, args.language,
-            args.max_duration_seconds, args.request_interval)
+            args.max_duration_seconds, args.request_interval, args.worker_id,
+            args.lease_minutes)
         print("Local transcription: " + ", ".join(f"{k}={v}" for k, v in report.items()))
     elif args.command == "transcription-queue":
         rows = transcription_candidates(conn, args.limit, args.episode_id,

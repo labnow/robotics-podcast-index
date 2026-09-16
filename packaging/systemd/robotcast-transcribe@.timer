@@ -1,11 +1,11 @@
 [Unit]
-Description=Run Robotcast transcription queue periodically
+Description=Run Robotcast transcription queue on physical GPU %i
 
 [Timer]
 OnBootSec=2min
 OnUnitInactiveSec=10min
 Persistent=true
-Unit=robotcast-transcribe.service
+Unit=robotcast-transcribe@%i.service
 
 [Install]
 WantedBy=timers.target

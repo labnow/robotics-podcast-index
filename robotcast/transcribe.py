@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from .api import PublicClient
-from .eligibility import transcription_candidates
+from .eligibility import claim_transcription_candidate, release_transcription_claim
 from .transcripts import _write_transcript
 
 
@@ -15,19 +15,21 @@ def transcribe_public_audio(conn, directory: Path, max_episodes: int = 1,
                             device: str = "cuda", fp16: bool = True,
                             language: str | None = None,
                             max_duration_seconds: int | None = None,
-                            request_interval: float = 4.0) -> dict[str, int]:
-    rows = transcription_candidates(conn, max_episodes, episode_ids,
-                                    max_duration_seconds)
+                            request_interval: float = 4.0,
+                            worker_id: str = "default",
+                            lease_minutes: int = 360) -> dict[str, int]:
     counts = {"attempted": 0, "available": 0, "errors": 0}
-    if not rows:
-        return counts
     try:
         import whisper
     except ImportError as exc:
         raise RuntimeError("Install local ASR with: pip install openai-whisper") from exc
     model = whisper.load_model(model_name, device=device)
     client, root = PublicClient(request_interval=request_interval), directory.resolve()
-    for row in rows:
+    for _ in range(max_episodes):
+        row = claim_transcription_candidate(conn, worker_id, episode_ids,
+                                            max_duration_seconds, lease_minutes)
+        if row is None:
+            break
         counts["attempted"] += 1
         try:
             suffix = Path(row["audio_url"].split("?", 1)[0]).suffix or ".audio"
@@ -68,4 +70,5 @@ def transcribe_public_audio(conn, directory: Path, max_episodes: int = 1,
               last_attempt_at=CURRENT_TIMESTAMP,error=excluded.error""", (row["episode_id"], str(exc)[:1000]))
             counts["errors"] += 1
         conn.commit()
+        release_transcription_claim(conn, row["episode_id"], worker_id)
     return counts

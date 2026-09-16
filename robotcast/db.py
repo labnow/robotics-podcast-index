@@ -181,6 +181,12 @@ CREATE TABLE IF NOT EXISTS episode_transcripts (
   ,model_name TEXT
   ,device TEXT
 );
+CREATE TABLE IF NOT EXISTS transcription_claims (
+  episode_id TEXT PRIMARY KEY REFERENCES episodes(episode_id) ON DELETE CASCADE,
+  worker_id TEXT NOT NULL,
+  claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  lease_until TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS episode_sources (
   episode_id TEXT NOT NULL REFERENCES episodes(episode_id) ON DELETE CASCADE,
   source TEXT NOT NULL,

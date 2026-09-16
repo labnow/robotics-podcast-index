@@ -33,7 +33,7 @@ case "$mode" in
       --max-episodes "${ROBOTCAST_PUBLISHER_TRANSCRIPT_BATCH:-500}" \
       --request-interval "${ROBOTCAST_REQUEST_INTERVAL:-3}"
     systemctl --user start --no-block robotcast-classify.service
-    systemctl --user start --no-block robotcast-transcribe.service
+    systemctl --user start --no-block robotcast-transcribe@1.service
     ;;
   publish)
     exec 9>"$project_dir/.robotcast/main-publish.lock"

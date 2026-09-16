@@ -6,7 +6,8 @@
   recovery/review, RSS synchronization, public-page enrichment, and publisher
   transcript fetching.
 - `robotcast-classify`: resumable Codex classification batches.
-- `robotcast-transcribe`: OpenAI Whisper `large-v3`, FP16, physical GPU 1.
+- `robotcast-transcribe@N`: OpenAI Whisper `large-v3`, FP16, on physical GPU N.
+  GPU 1 is the default; GPU 0 can be enabled as a second leased queue worker.
 - `robotcast-main@publish`: weekly transcript-aware quality scoring, static-site
   validation, and GitHub Pages publication.
 
@@ -23,6 +24,15 @@ scripts/robotcast_service.sh refresh
 scripts/robotcast_service.sh publish
 scripts/robotcast_service.sh status
 scripts/robotcast_service.sh logs
+```
+
+Workers atomically lease one episode at a time in SQLite. A crashed worker's
+claim expires after six hours, preventing duplicate work while allowing automatic
+recovery. Enable both installed cards for an overnight run with:
+
+```bash
+systemctl --user enable --now robotcast-transcribe@0.timer
+systemctl --user enable --now robotcast-transcribe@1.timer
 ```
 
 Get a concise database/queue/site snapshot (or JSON for monitoring):

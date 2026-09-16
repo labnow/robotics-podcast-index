@@ -1,5 +1,5 @@
 [Unit]
-Description=Robotcast queued GPU transcription
+Description=Robotcast queued GPU transcription on physical GPU %i
 After=network-online.target
 Wants=network-online.target
 
@@ -8,7 +8,8 @@ Type=oneshot
 WorkingDirectory=@PROJECT_DIR@
 Environment=PATH=@CONDA_DIR@:@CODEX_DIR@:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=@PROJECT_DIR@/scripts/background_worker.sh transcribe
+EnvironmentFile=-%h/.config/robotcast/robotcast.env
+ExecStart=@PROJECT_DIR@/scripts/background_worker.sh transcribe %i
 Nice=10
 
 [Install]

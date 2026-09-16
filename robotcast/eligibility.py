@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as dt
+
 
 def transcription_candidates(conn, limit: int = 20,
                              episode_ids: list[str] | None = None,
@@ -43,4 +45,35 @@ def transcription_candidates(conn, limit: int = 20,
       WHERE {' AND '.join(where)}
       GROUP BY e.episode_id
       ORDER BY priority DESC,e.duration_seconds ASC,e.age_popularity_percentile DESC,
-        e.published_at DESC,e.episode_id LIMIT ?""", params).fetchall()
+      e.published_at DESC,e.episode_id LIMIT ?""", params).fetchall()
+
+
+def claim_transcription_candidate(conn, worker_id: str,
+                                  episode_ids: list[str] | None = None,
+                                  max_duration_seconds: int | None = None,
+                                  lease_minutes: int = 360):
+    """Atomically lease the highest-priority available episode to one worker."""
+    lease_until = (dt.datetime.now(dt.timezone.utc) +
+                   dt.timedelta(minutes=lease_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM transcription_claims WHERE lease_until<=CURRENT_TIMESTAMP")
+        candidates = transcription_candidates(conn, 20, episode_ids, max_duration_seconds)
+        row = next((candidate for candidate in candidates if not conn.execute(
+            "SELECT 1 FROM transcription_claims WHERE episode_id=?",
+            (candidate["episode_id"],)).fetchone()), None)
+        if row is not None:
+            conn.execute("""INSERT INTO transcription_claims
+              (episode_id,worker_id,lease_until) VALUES(?,?,?)""",
+              (row["episode_id"], worker_id, lease_until))
+        conn.commit()
+        return row
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def release_transcription_claim(conn, episode_id: str, worker_id: str) -> None:
+    conn.execute("DELETE FROM transcription_claims WHERE episode_id=? AND worker_id=?",
+                 (episode_id, worker_id))
+    conn.commit()

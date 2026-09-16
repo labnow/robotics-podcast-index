@@ -9,7 +9,7 @@ Public site: <https://labnow.github.io/robotics-podcast-index/>
 ## What runs
 
 - Monthly: Apple discovery, historical RSS recovery, feed synchronization, and public-page enrichment.
-- Continuously: resumable classification and single-GPU Whisper transcription queues.
+- Continuously: resumable classification and lease-safe multi-GPU Whisper transcription queues.
 - Weekly: transcript-aware scoring, static-site validation, and GitHub Pages publication.
 - On demand: the same refresh and publication paths can be triggered manually.
 

@@ -8,7 +8,9 @@ from robotcast.api import ApplePodcastClient, PublicClient, PublicXiaoyuzhouClie
 from robotcast.collection import collect_terms
 from robotcast.db import connect, install_seeds, upsert_episode
 from robotcast.evolve import propose
-from robotcast.eligibility import transcription_candidates
+from robotcast.eligibility import (claim_transcription_candidate,
+                                   release_transcription_claim,
+                                   transcription_candidates)
 from robotcast.intelligence import pending_batch, validate_and_import
 from robotcast.quality import (RUBRIC_VERSION, calculate_quality,
                                calibration_report, ensure_calibration_sample,
@@ -49,6 +51,26 @@ class CoreTests(unittest.TestCase):
         self.assertGreater(propose(self.conn, min_episodes=2), 0)
         row = self.conn.execute("SELECT status,source FROM keywords WHERE term='端到端控制'").fetchone()
         self.assertEqual(tuple(row), ("candidate", "corpus_phrase"))
+
+    def test_transcription_claims_are_distinct_and_recoverable(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        for eid in ("claim-a", "claim-b"):
+            upsert_episode(self.conn, {"eid": eid, "title": eid, "duration": 60,
+                "audioUrl": f"https://audio/{eid}.mp3"}, "机器人")
+            self.conn.execute("UPDATE episodes SET relevance_score=3 WHERE episode_id=?", (eid,))
+        self.conn.commit()
+        other = connect(Path(self.temp.name) / "test.db")
+        try:
+            first = claim_transcription_candidate(self.conn, "gpu-0")
+            second = claim_transcription_candidate(other, "gpu-1")
+            self.assertNotEqual(first["episode_id"], second["episode_id"])
+            release_transcription_claim(self.conn, first["episode_id"], "gpu-0")
+            other.execute("UPDATE transcription_claims SET lease_until='2000-01-01 00:00:00'")
+            other.commit()
+            recovered = claim_transcription_candidate(self.conn, "gpu-0")
+            self.assertIn(recovered["episode_id"], {first["episode_id"], second["episode_id"]})
+        finally:
+            other.close()
 
     def test_apple_search_normalizes_authless_episode(self):
         client = ApplePodcastClient(request_interval=0)
