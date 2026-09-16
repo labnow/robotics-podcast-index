@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import json
 import sys
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from .registry import (build_historical_registry, resolve_ambiguous_registry,
                        recover_registry_from_episodes, registry_coverage_report,
                        seed_historical_registry)
 from .recall import apple_recall_report
+from .health import format_health, health_report
 
 
 def parser() -> argparse.ArgumentParser:
@@ -184,6 +186,9 @@ def parser() -> argparse.ArgumentParser:
         cmd = sub.add_parser(name)
         cmd.add_argument("term")
     sub.add_parser("stats")
+    health = sub.add_parser("health-report", help="Report queues, throughput, errors, registry, and site state")
+    health.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    health.add_argument("--site-directory", type=Path, default=Path("site-dist"))
     export = sub.add_parser("export-csv")
     export.add_argument("--out", type=Path, default=Path("robotics_episodes.csv"))
     export.add_argument("--min-relevance", type=int, choices=[0, 1, 2, 3], default=2)
@@ -450,6 +455,10 @@ def main() -> None:
         print(f"episodes\t{conn.execute('SELECT count(*) FROM episodes').fetchone()[0]}")
         for row in conn.execute("SELECT status,count(*) n FROM keywords GROUP BY status ORDER BY status"):
             print(f"keywords.{row['status']}\t{row['n']}")
+    elif args.command == "health-report":
+        report = health_report(conn, args.site_directory)
+        print(json.dumps(report, ensure_ascii=False, indent=2) if args.json
+              else format_health(report))
     elif args.command == "export-csv":
         grace = None if args.zero_play_grace_days < 0 else args.zero_play_grace_days
         print(f"Exported {export_csv(conn, args.out, args.min_relevance, args.min_quality, grace, args.description_max_chars)} episodes to {args.out}")

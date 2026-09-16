@@ -25,6 +25,13 @@ scripts/robotcast_service.sh status
 scripts/robotcast_service.sh logs
 ```
 
+Get a concise database/queue/site snapshot (or JSON for monitoring):
+
+```bash
+python -m robotcast health-report
+python -m robotcast health-report --json
+```
+
 Runtime configuration lives outside the repository at
 `~/.config/robotcast/robotcast.env`. Start from
 `config/robotcast.env.example`; never place tokens in the repository.

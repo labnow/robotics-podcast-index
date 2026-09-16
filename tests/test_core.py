@@ -21,6 +21,7 @@ from robotcast.registry import (build_historical_registry,
                                 registry_coverage_report,
                                 resolve_ambiguous_registry)
 from robotcast.recall import apple_recall_report
+from robotcast.health import format_health, health_report
 
 
 class CoreTests(unittest.TestCase):
@@ -241,6 +242,17 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(report["matched_shows"], 1)
         self.assertEqual(report["show_coverage_percent"], 100.0)
         self.assertEqual(report["episode_identity_coverage_percent"], 100.0)
+
+    def test_health_report_summarizes_operational_state(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        upsert_episode(self.conn, {"eid": "health", "title": "机器人访谈",
+            "podcast": {"title": "机器人电台"}}, "机器人")
+        self.conn.execute("UPDATE episodes SET relevance_score=3")
+        report = health_report(self.conn, Path(self.temp.name) / "missing-site")
+        self.assertEqual(report["corpus"]["episodes"], 1)
+        self.assertEqual(report["transcripts"]["relevant_missing"], 1)
+        self.assertFalse(report["site"]["present"])
+        self.assertIn("Corpus: 1 episodes", format_health(report))
 
     def test_classification_import_and_content_hash_cache(self):
         install_seeds(self.conn, {"core": ["机器人"]})
