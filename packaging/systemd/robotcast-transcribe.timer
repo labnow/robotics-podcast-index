@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Robotcast transcription queue periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=10min
+Persistent=true
+Unit=robotcast-transcribe.service
+
+[Install]
+WantedBy=timers.target

@@ -9,15 +9,22 @@ from .api import ApiError, ApplePodcastClient, PublicXiaoyuzhouClient
 from .collection import collect_terms
 from .db import active_keywords, connect, install_seeds, upsert_episode
 from .evolve import propose
+from .eligibility import transcription_candidates
 from .export import export_csv
 from .intelligence import curate_keywords, run_codex_parallel
-from .quality import RUBRIC_VERSION, run_quality
+from .quality import (RUBRIC_VERSION, calibration_report,
+                      ensure_calibration_sample, run_quality)
+from .quality_policy import (activate_quality_v2, rollback_quality, rollout_status,
+                             set_quality_override)
 from .scheduler import refresh_popularity_scores
 from .seeds import SEED_KEYWORDS
 from .site import build_site, validate_site
 from .transcripts import fetch_public_transcripts
 from .transcribe import transcribe_public_audio
 from .rss import sync_feeds
+from .registry import (build_historical_registry, resolve_ambiguous_registry,
+                       registry_coverage_report, seed_historical_registry)
+from .recall import apple_recall_report
 
 
 def parser() -> argparse.ArgumentParser:
@@ -85,14 +92,47 @@ def parser() -> argparse.ArgumentParser:
     quality.add_argument("--all", action="store_true")
     quality.add_argument("--max-episodes", type=int)
     quality.add_argument("--episode-id", action="append")
+    quality.add_argument("--transcripts-only", action="store_true",
+                         help="Assess only episodes with an available transcript")
+    calibration = sub.add_parser("calibrate-quality",
+                                 help="Run the persisted stratified quality-v2 sample")
+    calibration.add_argument("--batch-size", type=int, default=5)
+    calibration.add_argument("--model", default="gpt-5.6-luna")
+    calibration.add_argument("--reasoning-effort", default="low",
+                             choices=["minimal", "low", "medium", "high", "xhigh", "max"])
+    calibration.add_argument("--max-episodes", type=int, default=10)
+    calibration.add_argument("--sample-name", default="quality-v2-calibration")
+    rollout = sub.add_parser("quality-rollout-status",
+                             help="Check quality-v2 activation gates")
+    rollout.add_argument("--mode", choices=["strict", "hybrid"], default="strict")
+    activate_quality = sub.add_parser("activate-quality-v2",
+                                      help="Atomically activate quality-v2 when ready")
+    activate_quality.add_argument("--apply", action="store_true",
+                                  help="Required confirmation; otherwise report only")
+    activate_quality.add_argument("--mode", choices=["strict", "hybrid"],
+                                  default="strict")
+    sub.add_parser("rollback-quality", help="Atomically restore legacy quality")
+    override = sub.add_parser("quality-override", help="Record a reviewed v2 score")
+    override.add_argument("episode_id")
+    override.add_argument("score_10", type=float)
+    override.add_argument("--reason", required=True)
+    override.add_argument("--reviewer", required=True)
     transcribe = sub.add_parser("transcribe", help="Transcribe selected public audio locally")
     transcribe.add_argument("--episode-id", action="append")
     transcribe.add_argument("--max-episodes", type=int, default=1)
-    transcribe.add_argument("--model", default="large-v3-turbo")
-    transcribe.add_argument("--device", default="auto")
-    transcribe.add_argument("--compute-type", default="default")
+    transcribe.add_argument("--model", default="large-v3")
+    transcribe.add_argument("--device", default="cuda")
+    transcribe.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=True)
+    transcribe.add_argument("--language", help="ISO language code; omit for auto-detection")
+    transcribe.add_argument("--max-duration-seconds", type=int,
+                            help="Skip episodes longer than this duration")
     transcribe.add_argument("--request-interval", type=float, default=4.0)
     transcribe.add_argument("--directory", type=Path, default=Path(".robotcast/transcripts"))
+    queue = sub.add_parser("transcription-queue",
+                           help="Preview prioritized transcript-aware eligibility")
+    queue.add_argument("--limit", type=int, default=20)
+    queue.add_argument("--episode-id", action="append")
+    queue.add_argument("--max-duration-seconds", type=int)
     curate = sub.add_parser("curate-keywords")
     curate.add_argument("--limit", type=int, default=40)
     curate.add_argument("--model", default="gpt-5.6-luna")
@@ -113,6 +153,22 @@ def parser() -> argparse.ArgumentParser:
     feeds.add_argument("--max-feeds", type=int, default=20)
     feeds.add_argument("--max-episodes-per-feed", type=int, default=20)
     feeds.add_argument("--request-interval", type=float, default=4.0)
+    registry = sub.add_parser("build-rss-registry",
+                              help="Match historically relevant shows to Apple and RSS")
+    registry.add_argument("--max-shows", type=int, default=20)
+    registry.add_argument("--country", default="cn")
+    registry.add_argument("--request-interval", type=float, default=3.0)
+    registry.add_argument("--retry-errors", action="store_true")
+    registry.add_argument("--retry-not-found", action="store_true")
+    resolve_registry = sub.add_parser("resolve-rss-registry",
+        help="Resolve ambiguous show matches using historical episode evidence")
+    resolve_registry.add_argument("--max-shows", type=int, default=10)
+    resolve_registry.add_argument("--max-items", type=int, default=100)
+    resolve_registry.add_argument("--request-interval", type=float, default=3.0)
+    sub.add_parser("registry-report",
+                   help="Report historical RSS and episode-identity coverage")
+    sub.add_parser("discovery-recall-report",
+                   help="Measure the latest complete Apple keyword replay")
     words = sub.add_parser("keywords")
     words.add_argument("--status", choices=["active", "candidate", "rejected"])
     words.add_argument("--shortlisted", action="store_true")
@@ -123,8 +179,8 @@ def parser() -> argparse.ArgumentParser:
     export = sub.add_parser("export-csv")
     export.add_argument("--out", type=Path, default=Path("robotics_episodes.csv"))
     export.add_argument("--min-relevance", type=int, choices=[0, 1, 2, 3], default=2)
-    export.add_argument("--min-quality", type=int, choices=[0, 1, 2, 3],
-                        help="Optionally exclude episodes below this metadata-based quality score")
+    export.add_argument("--min-quality", type=float,
+                        help="Exclude episodes below the active quality measure")
     export.add_argument("--zero-play-grace-days", type=int, default=0,
                         help="Export grace period for zero-play episodes (default: 0; negative disables filter)")
     export.add_argument("--description-max-chars", type=int,
@@ -224,7 +280,7 @@ def main() -> None:
                     break
                 batch_size = min(batch_size, remaining)
             count = run_quality(conn, batch_size, args.model, args.reasoning_effort,
-                                args.episode_id)
+                                args.episode_id, args.transcripts_only)
             total += count
             if args.all and count:
                 print(f"Scored quality batch of {count}; total this run: {total}",
@@ -233,10 +289,58 @@ def main() -> None:
                 break
         print(f"Scored {total} episodes with {RUBRIC_VERSION}"
               if total else f"No episodes need {RUBRIC_VERSION} assessment")
+    elif args.command == "calibrate-quality":
+        ensure_calibration_sample(conn, args.sample_name)
+        ids = [row[0] for row in conn.execute("""SELECT episode_id
+          FROM quality_calibration_selections WHERE sample_name=?
+          ORDER BY stratum,episode_id""", (args.sample_name,))]
+        total = 0
+        while total < args.max_episodes:
+            count = run_quality(conn, min(args.batch_size, args.max_episodes - total),
+                                args.model, args.reasoning_effort, ids)
+            if not count:
+                break
+            total += count
+            print(f"Calibrated batch of {count}; total this run: {total}", file=sys.stderr)
+        report = calibration_report(conn, args.sample_name)
+        print("Quality calibration: " + ", ".join(f"{k}={v}" for k, v in report.items()))
+    elif args.command == "quality-rollout-status":
+        report = rollout_status(conn, mode=args.mode)
+        print("Quality rollout: " + ", ".join(f"{k}={v}" for k, v in report.items()))
+    elif args.command == "activate-quality-v2":
+        report = rollout_status(conn, mode=args.mode)
+        if not args.apply:
+            print("Quality rollout dry run: " + ", ".join(f"{k}={v}" for k, v in report.items()))
+        else:
+            try:
+                report = activate_quality_v2(conn, mode=args.mode)
+            except RuntimeError as exc:
+                sys.exit(str(exc))
+            print("Quality rollout activated: " + ", ".join(f"{k}={v}" for k, v in report.items()))
+    elif args.command == "rollback-quality":
+        rollback_quality(conn)
+        print("Quality measure restored to legacy")
+    elif args.command == "quality-override":
+        set_quality_override(conn, args.episode_id, args.score_10,
+                             args.reason, args.reviewer)
+        print(f"Quality override recorded for {args.episode_id}")
     elif args.command == "transcribe":
+        Path(".robotcast").mkdir(exist_ok=True)
+        transcription_lock = Path(".robotcast/transcribe.lock").open("w")
+        try:
+            fcntl.flock(transcription_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit("Another robotcast transcription worker is already running")
         report = transcribe_public_audio(conn, args.directory, args.max_episodes,
-            args.episode_id, args.model, args.device, args.compute_type, args.request_interval)
+            args.episode_id, args.model, args.device, args.fp16, args.language,
+            args.max_duration_seconds, args.request_interval)
         print("Local transcription: " + ", ".join(f"{k}={v}" for k, v in report.items()))
+    elif args.command == "transcription-queue":
+        rows = transcription_candidates(conn, args.limit, args.episode_id,
+                                        args.max_duration_seconds)
+        for row in rows:
+            print(f"{row['priority']:>3}  {row['reason']:<24}  "
+                  f"{row['episode_id']}  {row['podcast_name']} — {row['title']}")
     elif args.command == "curate-keywords":
         print(f"Shortlisted {curate_keywords(conn, args.limit, args.model, args.reasoning_effort)} keywords")
     elif args.command == "probe-keywords":
@@ -283,6 +387,25 @@ def main() -> None:
         report = sync_feeds(conn, ApplePodcastClient(args.request_interval), args.max_feeds,
                             args.max_episodes_per_feed)
         print("RSS sync: " + ", ".join(f"{k}={v}" for k, v in report.items()))
+    elif args.command == "build-rss-registry":
+        seeded = seed_historical_registry(conn)
+        client = ApplePodcastClient(args.request_interval, country=args.country)
+        report = build_historical_registry(conn, client, args.max_shows,
+                                           args.retry_errors, args.retry_not_found)
+        print(f"Historical RSS registry: seeded={seeded}, " +
+              ", ".join(f"{k}={v}" for k, v in report.items()))
+    elif args.command == "resolve-rss-registry":
+        report = resolve_ambiguous_registry(conn, ApplePodcastClient(args.request_interval),
+                                            args.max_shows, args.max_items)
+        print("RSS registry review: " + ", ".join(f"{k}={v}" for k, v in report.items()))
+    elif args.command == "registry-report":
+        report = registry_coverage_report(conn)
+        print("RSS registry coverage: " + ", ".join(
+            f"{key}={value}" for key, value in report.items()))
+    elif args.command == "discovery-recall-report":
+        report = apple_recall_report(conn)
+        print("Apple discovery recall: " + ", ".join(
+            f"{key}={value}" for key, value in report.items()))
     elif args.command == "keywords":
         if args.shortlisted:
             for row in conn.execute("""SELECT s.score,s.term,s.reason,k.evidence_count,

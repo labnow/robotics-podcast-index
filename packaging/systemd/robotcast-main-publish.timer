@@ -1,0 +1,11 @@
+[Unit]
+Description=Assess new transcripts and refresh Robotcast Pages
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+RandomizedDelaySec=2h
+Persistent=true
+Unit=robotcast-main@publish.service
+
+[Install]
+WantedBy=timers.target

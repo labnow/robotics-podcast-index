@@ -1,0 +1,2 @@
+- use conda env 'robotcast-whisper-gpu'
+- use gpu 1

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run monthly Robotcast auth-less refresh
+
+[Timer]
+OnCalendar=monthly
+RandomizedDelaySec=6h
+Persistent=true
+Unit=robotcast-main@refresh.service
+
+[Install]
+WantedBy=timers.target

@@ -12,8 +12,11 @@ NS = {"podcast": "https://podcastindex.org/namespace/1.0"}
 
 def sync_feeds(conn, client: PublicClient, max_feeds: int = 20,
                max_episodes_per_feed: int = 20) -> dict[str, int]:
-    feeds = conn.execute("""SELECT feed_url,count(*) n FROM episode_sources
-      WHERE feed_url IS NOT NULL GROUP BY feed_url ORDER BY n DESC LIMIT ?""", (max_feeds,)).fetchall()
+    feeds = conn.execute("""SELECT feed_url,max(n) n FROM (
+      SELECT feed_url,count(*) n FROM episode_sources WHERE feed_url IS NOT NULL GROUP BY feed_url
+      UNION ALL SELECT feed_url,1000000 n FROM podcast_registry
+      WHERE match_status='matched' AND feed_url IS NOT NULL)
+      GROUP BY feed_url ORDER BY n DESC LIMIT ?""", (max_feeds,)).fetchall()
     report = {"feeds": 0, "episodes": 0, "new": 0, "errors": 0}
     for feed in feeds:
         try:

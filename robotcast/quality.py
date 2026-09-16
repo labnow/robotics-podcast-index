@@ -22,6 +22,118 @@ FLAGS = {
     "duplicate": 4,
 }
 
+EDGE_TERMS = ("早报", "日报", "周报", "快讯", "新闻", "资讯", "roundup", "daily",
+              "promotional", "发布会", "品牌")
+
+
+def ensure_calibration_sample(conn, sample_name: str = "quality-v2-calibration") -> int:
+    """Persist a reproducible 100-item legacy-tier and edge-case sample."""
+    existing = conn.execute("""SELECT count(*) FROM quality_calibration_selections
+      WHERE sample_name=?""", (sample_name,)).fetchone()[0]
+    if existing:
+        return existing
+    selected: set[str] = set()
+
+    def add(stratum: str, condition: str, limit: int, params=()) -> None:
+        if limit <= 0:
+            return
+        placeholders = ",".join("?" for _ in selected)
+        exclusion = f"AND e.episode_id NOT IN ({placeholders})" if selected else ""
+        rows = conn.execute(f"""SELECT e.episode_id FROM episodes e
+          LEFT JOIN episode_transcripts t USING(episode_id)
+          LEFT JOIN quality_assessments q ON q.episode_id=e.episode_id
+            AND q.rubric_version=?
+          WHERE e.relevance_score>=2 AND coalesce(e.play_count,0)>0
+            AND ({condition}) {exclusion}
+          ORDER BY CASE WHEN q.episode_id IS NOT NULL THEN 0
+                        WHEN t.status='available' THEN 1 ELSE 2 END,
+                   e.episode_id LIMIT ?""",
+          (RUBRIC_VERSION, *params, *selected, limit)).fetchall()
+        for row in rows:
+            selected.add(row[0])
+            conn.execute("""INSERT INTO quality_calibration_selections
+              (sample_name,episode_id,stratum) VALUES(?,?,?)""",
+              (sample_name, row[0], stratum))
+
+    edge_clause = " OR ".join(
+        "lower(coalesce(e.title,'') || ' ' || coalesce(e.podcast_name,'')) LIKE ?"
+        for _ in EDGE_TERMS)
+    add("edge_case", edge_clause, 10, tuple(f"%{term.casefold()}%" for term in EDGE_TERMS))
+    add("legacy_q3", "e.quality_score=3", 30)
+    add("legacy_q2", "e.quality_score=2", 40)
+    add("legacy_q1", "e.quality_score=1", 20)
+    # Fill shortages (for small corpora/tests) while keeping the total bounded.
+    add("relevant_fill", "1=1", 100 - len(selected))
+    conn.commit()
+    return len(selected)
+
+
+def calibration_report(conn, sample_name: str = "quality-v2-calibration") -> dict:
+    rows = conn.execute("""SELECT s.stratum,e.quality_score legacy_tier,
+      q.quality_tier v2_tier,q.score_10,q.confidence,q.transcript_used
+      FROM quality_calibration_selections s JOIN episodes e USING(episode_id)
+      LEFT JOIN quality_assessments q ON q.episode_id=e.episode_id
+        AND q.rubric_version=? WHERE s.sample_name=?""",
+        (RUBRIC_VERSION, sample_name)).fetchall()
+    assessed = [row for row in rows if row["v2_tier"] is not None]
+    changed = sum(row["legacy_tier"] != row["v2_tier"] for row in assessed)
+    paired_rows = conn.execute("""WITH paired AS (
+      SELECT r.episode_id,
+        max(CASE WHEN r.transcript_used=0 THEN r.score_10 END) metadata_score,
+        max(CASE WHEN r.transcript_used=1 THEN r.score_10 END) transcript_score,
+        max(CASE WHEN r.transcript_used=0 THEN r.quality_tier END) metadata_tier,
+        max(CASE WHEN r.transcript_used=1 THEN r.quality_tier END) transcript_tier,
+        max(CASE WHEN r.transcript_used=0 THEN r.confidence END) metadata_confidence,
+        max(CASE WHEN r.transcript_used=1 THEN r.confidence END) transcript_confidence
+      FROM quality_assessment_runs r JOIN quality_calibration_selections s
+        USING(episode_id) WHERE s.sample_name=? AND r.rubric_version=?
+      GROUP BY r.episode_id HAVING metadata_score IS NOT NULL
+        AND transcript_score IS NOT NULL)
+      SELECT * FROM paired""", (sample_name, RUBRIC_VERSION)).fetchall()
+    paired_count = len(paired_rows)
+    mean_score_delta = (round(sum(row["transcript_score"] - row["metadata_score"]
+                                  for row in paired_rows) / paired_count, 2)
+                        if paired_count else 0.0)
+    mean_confidence_delta = (round(sum(row["transcript_confidence"] -
+        row["metadata_confidence"] for row in paired_rows) / paired_count, 2)
+        if paired_count else 0.0)
+    negative_pairs = [row for row in paired_rows if row["metadata_score"] <= 1]
+    boundary_pairs = [row for row in paired_rows if 4 <= row["metadata_score"] <= 8]
+    boundary_tier_changes = sum(row["metadata_tier"] != row["transcript_tier"]
+                                for row in boundary_pairs)
+    boundary_mean_delta = (round(sum(row["transcript_score"] - row["metadata_score"]
+        for row in boundary_pairs) / len(boundary_pairs), 2) if boundary_pairs else 0.0)
+    low_confidence = sum(row["confidence"] in (0, 1) for row in assessed)
+    unresolved_boundaries = sum(row["confidence"] in (0, 1) and
+                                4 <= row["score_10"] <= 8 for row in assessed)
+    blockers = []
+    if len(assessed) < 100:
+        blockers.append("sample_incomplete")
+    if len(negative_pairs) < 5 or len(boundary_pairs) < 5:
+        blockers.append("insufficient_stratified_pairs")
+    if unresolved_boundaries:
+        blockers.append("unresolved_quality_boundaries")
+    if boundary_pairs and (boundary_mean_delta > 1 or
+                           boundary_tier_changes / len(boundary_pairs) > 0.2):
+        blockers.append("metadata_transcript_instability")
+    return {
+        "selected": len(rows), "assessed": len(assessed),
+        "transcript_informed": sum(row["transcript_used"] or 0 for row in assessed),
+        "tier_changed": changed,
+        "tier_changed_percent": round(100 * changed / len(assessed), 1) if assessed else 0.0,
+        "low_confidence": low_confidence,
+        "paired_comparisons": paired_count,
+        "paired_negative_controls": len(negative_pairs),
+        "paired_boundaries": len(boundary_pairs),
+        "paired_mean_score_delta": mean_score_delta,
+        "paired_mean_confidence_delta": mean_confidence_delta,
+        "boundary_mean_score_delta": boundary_mean_delta,
+        "boundary_tier_changes": boundary_tier_changes,
+        "unresolved_boundaries": unresolved_boundaries,
+        "rollout_ready": not blockers,
+        "rollout_blockers": blockers,
+    }
+
 
 def calculate_quality(dimensions: dict[str, int], flags: list[str],
                       confidence: int) -> tuple[float, int]:
@@ -42,12 +154,15 @@ def _assessment_hash(row) -> str:
 
 
 def pending_quality_batch(conn, limit: int = 5,
-                          episode_ids: list[str] | None = None) -> list[dict]:
+                          episode_ids: list[str] | None = None,
+                          transcripts_only: bool = False) -> list[dict]:
     params: list[object] = [RUBRIC_VERSION]
     where = ["e.relevance_score>=2", "coalesce(e.play_count,0)>0"]
     if episode_ids:
         where.append(f"e.episode_id IN ({','.join('?' for _ in episode_ids)})")
         params.extend(episode_ids)
+    if transcripts_only:
+        where.append("t.status='available'")
     rows = conn.execute(f"""SELECT e.episode_id,e.title,e.podcast_name,e.description,
       e.duration_seconds,t.transcript_path,t.content_hash AS transcript_hash,
       q.content_hash AS assessed_hash
@@ -146,6 +261,14 @@ def validate_and_import(conn, batch: list[dict], result: dict, classifier: str) 
         item = expected[request_id]
         score, tier = calculate_quality(dimensions, flags, confidence)
         used = int(bool(item["transcript_excerpt"]))
+        values = (item["episode_id"], RUBRIC_VERSION, item["content_hash"], score, tier,
+                  json.dumps(dimensions, ensure_ascii=False),
+                  json.dumps(flags, ensure_ascii=False), confidence, reason.strip(),
+                  classifier, used)
+        conn.execute("""INSERT INTO quality_assessment_runs
+          (episode_id,rubric_version,content_hash,score_10,quality_tier,dimensions_json,
+           flags_json,confidence,reason,classifier,transcript_used)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING""", values)
         conn.execute("""INSERT INTO quality_assessments
           (episode_id,rubric_version,content_hash,score_10,quality_tier,dimensions_json,
            flags_json,confidence,reason,classifier,transcript_used)
@@ -155,9 +278,7 @@ def validate_and_import(conn, batch: list[dict], result: dict, classifier: str) 
           flags_json=excluded.flags_json,confidence=excluded.confidence,reason=excluded.reason,
           classifier=excluded.classifier,transcript_used=excluded.transcript_used,
           assessed_at=CURRENT_TIMESTAMP""",
-          (item["episode_id"], RUBRIC_VERSION, item["content_hash"], score, tier,
-           json.dumps(dimensions, ensure_ascii=False), json.dumps(flags, ensure_ascii=False),
-           confidence, reason.strip(), classifier, used))
+          values)
         # Keep the existing 0-3 production tier unchanged during calibration.
         # The v2 score can be rolled out atomically after a representative audit,
         # avoiding a corpus that mixes legacy and v2 tiers.
@@ -173,10 +294,11 @@ def validate_and_import(conn, batch: list[dict], result: dict, classifier: str) 
 
 def run_quality(conn, batch_size: int = 5, model: str = "gpt-5.6-luna",
                 reasoning_effort: str = "low",
-                episode_ids: list[str] | None = None) -> int:
+                episode_ids: list[str] | None = None,
+                transcripts_only: bool = False) -> int:
     if not shutil.which("codex"):
         raise RuntimeError("codex executable was not found on PATH")
-    batch = pending_quality_batch(conn, batch_size, episode_ids)
+    batch = pending_quality_batch(conn, batch_size, episode_ids, transcripts_only)
     if not batch:
         return 0
     with tempfile.TemporaryDirectory(prefix="robotcast-quality-") as directory:

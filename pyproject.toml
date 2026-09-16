@@ -8,11 +8,14 @@ requires-python = ">=3.11"
 robotcast = "robotcast.cli:main"
 
 [project.optional-dependencies]
-transcribe = ["faster-whisper>=1.1"]
+transcribe = ["openai-whisper>=20250625"]
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["robotcast*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

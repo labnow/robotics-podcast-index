@@ -67,7 +67,7 @@ def _percentiles(rows, now: datetime, by_show: bool = False) -> dict[str, float]
 
 def ranked_candidates(conn, now: datetime | None = None,
                       episode_ids: list[str] | None = None) -> list[dict]:
-    """Rank LLM candidates without using keyword-overlap as a relevance proxy."""
+    """Rank candidates using learned precision, trusted shows, and exploration."""
     now = now or datetime.now(timezone.utc)
     all_rows = conn.execute("SELECT * FROM episodes").fetchall()
     popularity = _percentiles(all_rows, now)
@@ -79,6 +79,20 @@ def ranked_candidates(conn, now: datetime | None = None,
           FROM episodes WHERE relevance_score IS NOT NULL AND podcast_name IS NOT NULL
           GROUP BY podcast_name""")
     }
+    keyword_stats = {
+        row["keyword"]: row for row in conn.execute("""SELECT m.keyword,
+          count(DISTINCT e.episode_id) classified,
+          sum(CASE WHEN e.relevance_score>=2 THEN 1 ELSE 0 END) relevant
+          FROM episode_matches m JOIN episodes e USING(episode_id)
+          JOIN keywords k ON k.term=m.keyword
+          WHERE e.relevance_score IS NOT NULL AND k.status='active'
+          GROUP BY m.keyword""")
+    }
+    episode_keywords: dict[str, list[str]] = {}
+    for item in conn.execute("""SELECT m.episode_id,m.keyword FROM episode_matches m
+      JOIN keywords k ON k.term=m.keyword WHERE k.status='active'"""):
+        episode_keywords.setdefault(item["episode_id"], []).append(item["keyword"])
+    evidence_ready = sum(row["classified"] for row in keyword_stats.values()) >= 20
     wanted = set(episode_ids or [])
     candidates = []
     for row in all_rows:
@@ -91,8 +105,24 @@ def ranked_candidates(conn, now: datetime | None = None,
         trusted = bool(stats and stats["classified"] >= 2 and
                        stats["relevant"] / stats["classified"] >= 0.6)
         exploration = int(hashlib.sha256(row["episode_id"].encode()).hexdigest()[:8], 16) % 10 == 0
+        keyword_precision = max((
+            (keyword_stats[term]["relevant"] + 2) /
+            (keyword_stats[term]["classified"] + 4)
+            for term in episode_keywords.get(row["episode_id"], ())
+            if term in keyword_stats), default=0.0)
+        prefilter_reason = (
+            "explicit" if wanted else
+            "cold_start" if not evidence_ready else
+            "trusted_show" if trusted else
+            "keyword_evidence" if keyword_precision >= 0.5 else
+            "exploration" if exploration else "deferred_low_evidence"
+        )
+        prefilter_pass = bool(wanted or not evidence_ready or trusted or
+                              keyword_precision >= 0.5 or exploration)
         if wanted:
             reason, priority = "recall_audit", 200.0
+        elif keyword_precision >= 0.5:
+            reason, priority = "keyword_evidence", 90.0 + keyword_precision
         elif days is not None and days <= 2:
             reason, priority = "recent", 120.0 + pct
         elif pct >= 0.75:
@@ -106,6 +136,8 @@ def ranked_candidates(conn, now: datetime | None = None,
         candidates.append({
             "row": row, "selection_reason": reason,
             "priority_score": priority, "age_popularity_percentile": pct,
+            "keyword_precision": keyword_precision,
+            "prefilter_reason": prefilter_reason, "prefilter_pass": prefilter_pass,
         })
     candidates.sort(key=lambda item: (
         item["priority_score"], item["row"]["published_at"] or ""

@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import hashlib
 from pathlib import Path
 from unittest import mock
 
@@ -7,11 +8,17 @@ from robotcast.api import ApplePodcastClient, PublicClient, PublicXiaoyuzhouClie
 from robotcast.collection import collect_terms
 from robotcast.db import connect, install_seeds, upsert_episode
 from robotcast.evolve import propose
+from robotcast.eligibility import transcription_candidates
 from robotcast.intelligence import pending_batch, validate_and_import
 from robotcast.quality import (RUBRIC_VERSION, calculate_quality,
+                               calibration_report, ensure_calibration_sample,
                                pending_quality_batch,
                                validate_and_import as import_quality)
 from robotcast.transcripts import fetch_public_transcripts
+from robotcast.matching import duration_close, normalize_title
+from robotcast.registry import (build_historical_registry, registry_coverage_report,
+                                resolve_ambiguous_registry)
+from robotcast.recall import apple_recall_report
 
 
 class CoreTests(unittest.TestCase):
@@ -72,6 +79,92 @@ class CoreTests(unittest.TestCase):
         sources = self.conn.execute("SELECT source FROM episode_sources ORDER BY source").fetchall()
         self.assertEqual([row[0] for row in sources], ["apple", "xiaoyuzhou"])
 
+    def test_cross_source_normalized_title_and_duration_matching(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        first = {"eid": "legacy", "title": "EP. 42：机器人，如何学习？",
+                 "pubDate": "2026-09-01T00:00:00Z", "duration": 3600,
+                 "podcast": {"title": "Tech Talk"}}
+        second = {"eid": "apple_42", "source": "apple", "sourceEpisodeId": "42",
+                  "title": "机器人如何学习", "pubDate": "2026-09-01T12:00:00Z",
+                  "duration": 3670, "podcast": {"title": "Ｔｅｃｈ　Ｔａｌｋ"}}
+        self.assertTrue(upsert_episode(self.conn, first, "机器人"))
+        self.assertFalse(upsert_episode(self.conn, second, "机器人"))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM episodes").fetchone()[0], 1)
+        self.assertEqual(normalize_title("EP. 42：机器人，如何学习？"), "机器人如何学习")
+        self.assertTrue(duration_close(3600, 3670))
+
+    def test_ambiguous_normalized_match_enters_review_queue(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        upsert_episode(self.conn, {"eid": "one", "title": "机器人访谈",
+            "pubDate": "2026-09-01T00:00:00Z", "duration": 1800,
+            "podcast": {"title": "同名播客"}}, "机器人")
+        self.conn.execute("""INSERT INTO episodes
+          (episode_id,podcast_name,title,published_at,duration_seconds,url,raw_json,
+           normalized_title,normalized_podcast_name)
+          VALUES('two','同名播客','机器人访谈','2026-09-01T00:00:00Z',1800,'https://two','{}',
+                 '机器人访谈','同名播客')""")
+        upsert_episode(self.conn, {"eid": "apple_x", "source": "apple",
+            "sourceEpisodeId": "x", "title": "机器人访谈",
+            "pubDate": "2026-09-01T01:00:00Z", "duration": 1801,
+            "podcast": {"title": "同名播客"}}, "机器人")
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM match_review_queue WHERE status='pending'").fetchone()[0], 1)
+
+    def test_historical_registry_is_resumable(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        upsert_episode(self.conn, {"eid": "legacy", "title": "机器人访谈",
+            "podcast": {"pid": "show1", "title": "机器人电台"}}, "机器人")
+        self.conn.execute("UPDATE episodes SET relevance_score=3")
+        class Client:
+            def search_podcasts(self, name, limit):
+                return [{"collectionId": 7, "collectionName": "机器人电台",
+                         "feedUrl": "http://example.com/feed.xml",
+                         "collectionViewUrl": "https://apple/show/7"}]
+        first = build_historical_registry(self.conn, Client(), 10)
+        second = build_historical_registry(self.conn, Client(), 10)
+        self.assertEqual((first["matched"], second["attempted"]), (1, 0))
+        row = self.conn.execute("SELECT match_status,feed_url FROM podcast_registry").fetchone()
+        self.assertEqual(tuple(row), ("matched", "https://example.com/feed.xml"))
+
+    def test_ambiguous_registry_resolves_from_episode_evidence(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        for eid, title in (("a", "机器人的触觉"), ("b", "灵巧手训练")):
+            upsert_episode(self.conn, {"eid": eid, "title": title,
+                "podcast": {"pid": "show", "title": "DeepTalk"}}, "机器人")
+            self.conn.execute("UPDATE episodes SET relevance_score=3 WHERE episode_id=?", (eid,))
+        build_historical_registry(self.conn, type("Search", (), {
+            "search_podcasts": lambda self, name, limit: [
+                {"collectionId": 1, "collectionName": "Deep Talk", "feedUrl": "https://wrong"},
+                {"collectionId": 2, "collectionName": "deep talk", "feedUrl": "https://right"}],
+        })(), 1)
+        class Feeds:
+            def get_bytes(self, url):
+                titles = ["别的节目"] if url.endswith("wrong") else ["机器人的触觉", "灵巧手训练"]
+                items = "".join(f"<item><title>{title}</title></item>" for title in titles)
+                return f"<rss><channel>{items}</channel></rss>".encode()
+        report = resolve_ambiguous_registry(self.conn, Feeds(), 1)
+        self.assertEqual(report["resolved"], 1)
+        row = self.conn.execute("SELECT match_status,apple_collection_id,feed_url FROM podcast_registry").fetchone()
+        self.assertEqual(tuple(row), ("matched", "2", "https://right/"))
+
+    def test_registry_coverage_report(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        upsert_episode(self.conn, {"eid": "legacy", "title": "机器人访谈",
+            "podcast": {"pid": "show", "title": "机器人电台"}}, "机器人")
+        self.conn.execute("UPDATE episodes SET relevance_score=3")
+        build_historical_registry(self.conn, type("Search", (), {
+            "search_podcasts": lambda self, name, limit: [{
+                "collectionId": 7, "collectionName": "机器人电台",
+                "feedUrl": "https://example.com/feed.xml"}],
+        })(), 1)
+        self.conn.execute("""INSERT INTO episode_sources
+          (episode_id,source,source_episode_id)
+          VALUES('legacy','rss','rss-legacy')""")
+        report = registry_coverage_report(self.conn)
+        self.assertEqual(report["matched_shows"], 1)
+        self.assertEqual(report["show_coverage_percent"], 100.0)
+        self.assertEqual(report["episode_identity_coverage_percent"], 100.0)
+
     def test_classification_import_and_content_hash_cache(self):
         install_seeds(self.conn, {"core": ["机器人"]})
         upsert_episode(self.conn, {"eid": "e1", "title": "具身数据闭环"}, "机器人")
@@ -103,6 +196,28 @@ class CoreTests(unittest.TestCase):
         batch = pending_batch(self.conn, 10, min_matches=99)
         self.assertEqual({item["episode_id"] for item in batch}, {"one", "three"})
 
+    def test_empirical_prefilter_defers_weak_lane_but_keeps_exploration(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        for number in range(20):
+            eid = f"negative-{number}"
+            upsert_episode(self.conn, {"eid": eid, "title": eid,
+                                       "podcast": {"title": "broad"}}, "机器人")
+            self.conn.execute("UPDATE episodes SET relevance_score=0 WHERE episode_id=?",
+                              (eid,))
+        deferred = next(f"deferred-{n}" for n in range(100)
+            if int(hashlib.sha256(f"deferred-{n}".encode()).hexdigest()[:8], 16) % 10)
+        explore = next(f"explore-{n}" for n in range(100)
+            if int(hashlib.sha256(f"explore-{n}".encode()).hexdigest()[:8], 16) % 10 == 0)
+        for eid in (deferred, explore):
+            upsert_episode(self.conn, {"eid": eid, "title": eid,
+                                       "podcast": {"title": "new show"}}, "机器人")
+        batch = pending_batch(self.conn, 100)
+        selected = {item["episode_id"] for item in batch}
+        self.assertNotIn(deferred, selected)
+        self.assertIn(explore, selected)
+        self.assertEqual(next(item for item in batch if item["episode_id"] == explore)
+                         ["prefilter_reason"], "exploration")
+
     def test_direct_episode_selection_becomes_recall_audit(self):
         install_seeds(self.conn, {"core": ["具身智能"]})
         upsert_episode(self.conn, {"eid": "miss", "title": "具身访谈"}, "具身智能")
@@ -129,6 +244,22 @@ class CoreTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual([row[0] for row in ranks], [1, 1])
 
+    def test_apple_recall_requires_complete_active_keyword_replay(self):
+        install_seeds(self.conn, {"core": ["机器人", "具身智能"]})
+        self.assertFalse(apple_recall_report(self.conn)["complete_replay"])
+        for eid in ("known", "other"):
+            upsert_episode(self.conn, {"eid": eid, "title": eid}, "机器人")
+        self.conn.execute("UPDATE episodes SET relevance_score=3 WHERE episode_id='known'")
+        run = self.conn.execute("""INSERT INTO collection_runs
+          (kind,keywords_searched,hits_seen,new_episodes,finished_at)
+          VALUES('routine',2,2,1,CURRENT_TIMESTAMP)""").lastrowid
+        self.conn.execute("""INSERT INTO search_observations
+          (collection_run_id,keyword,episode_id,search_rank,page_number,collection_kind)
+          VALUES(?, '机器人','known',1,1,'routine')""", (run,))
+        report = apple_recall_report(self.conn)
+        self.assertEqual((report["known_relevant"], report["recovered_relevant"],
+                          report["recall_percent"]), (1, 1, 100.0))
+
     def test_quality_score_is_deterministic_and_confidence_capped(self):
         dimensions = {name: 2 for name in
                       ("depth", "specificity", "expertise", "originality", "structure")}
@@ -136,12 +267,26 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(calculate_quality(dimensions, ["automated_roundup"], 2), (7.0, 2))
         self.assertEqual(calculate_quality(dimensions, [], 0), (4.0, 1))
 
+    def test_quality_calibration_sample_is_persisted_and_resumable(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        for number, tier in enumerate((1, 2, 3)):
+            upsert_episode(self.conn, {"eid": f"q{tier}", "title": f"episode {number}",
+                "playCount": 10}, "机器人")
+            self.conn.execute("UPDATE episodes SET relevance_score=2,quality_score=? WHERE episode_id=?",
+                              (tier, f"q{tier}"))
+        first = ensure_calibration_sample(self.conn, "test")
+        second = ensure_calibration_sample(self.conn, "test")
+        self.assertEqual((first, second), (3, 3))
+        self.assertEqual(calibration_report(self.conn, "test")["selected"], 3)
+
     def test_versioned_quality_assessment_import(self):
         install_seeds(self.conn, {"core": ["机器人"]})
         upsert_episode(self.conn, {"eid": "quality", "title": "机器人技术访谈",
                                     "playCount": 10}, "机器人")
         self.conn.execute("""UPDATE episodes SET relevance_score=3,quality_score=3,
           quality_reason='legacy' WHERE episode_id='quality'""")
+        self.assertEqual(pending_quality_batch(
+            self.conn, 1, transcripts_only=True), [])
         batch = pending_quality_batch(self.conn, 1)
         result = {"assessments": [{
             "request_id": "E001",
@@ -153,6 +298,8 @@ class CoreTests(unittest.TestCase):
         row = self.conn.execute("""SELECT score_10,quality_tier,rubric_version
           FROM quality_assessments WHERE episode_id='quality'""").fetchone()
         self.assertEqual(tuple(row), (9.0, 3, RUBRIC_VERSION))
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM quality_assessment_runs").fetchone()[0], 1)
         legacy = self.conn.execute("SELECT quality_score,quality_reason FROM episodes WHERE episode_id='quality'").fetchone()
         self.assertEqual(tuple(legacy), (3, "legacy"))
         self.assertEqual(pending_quality_batch(self.conn, 1), [])
@@ -177,6 +324,22 @@ class CoreTests(unittest.TestCase):
         row = self.conn.execute("SELECT transcript_path,status FROM episode_transcripts").fetchone()
         self.assertEqual(row["status"], "available")
         self.assertTrue(Path(row["transcript_path"]).is_file())
+
+    def test_transcription_queue_prioritizes_low_confidence_then_relevance(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        for eid in ("high", "uncertain"):
+            upsert_episode(self.conn, {"eid": eid, "title": eid,
+                "audioUrl": f"https://audio/{eid}.mp3"}, "机器人")
+        self.conn.execute("""UPDATE episodes SET relevance_score=3,quality_score=3
+          WHERE episode_id='high'""")
+        self.conn.execute("""UPDATE episodes SET relevance_score=2,quality_score=2,
+          quality_score_10=5,quality_confidence=0 WHERE episode_id='uncertain'""")
+        rows = transcription_candidates(self.conn, 10)
+        self.assertEqual([row["episode_id"] for row in rows], ["uncertain", "high"])
+        self.assertEqual(rows[0]["reason"], "uncertain_q2_q3_boundary")
+        manual = transcription_candidates(self.conn, 1, ["high"])
+        self.assertEqual((manual[0]["priority"], manual[0]["reason"]),
+                         (100, "manual_request"))
 
 
 if __name__ == "__main__":

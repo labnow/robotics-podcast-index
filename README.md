@@ -2,6 +2,19 @@
 
 An episode-level Xiaoyuzhou collector for robotics and embodied AI. Discovery is deliberately high-recall keyword search; relevance scoring and keyword evolution are separate stages.
 
+Runtime commands use the `robotcast-whisper-gpu` Conda environment. Service
+installation, private data boundaries, scheduling, monitoring, and recovery are
+documented in [`docs/operations.md`](docs/operations.md).
+
+## Repository layout
+
+- `robotcast/`: collector, matching, classification, quality, transcription, and site code.
+- `scripts/`: manual and scheduled operational entry points.
+- `packaging/systemd/`: portable user-service templates and timers.
+- `config/`: non-secret configuration examples.
+- `docs/`: architecture, rollout, migration, and operational documentation.
+- `tests/`: database, matching, quality, export, and site regression tests.
+
 ## How discovery improves
 
 1. Active seed terms retrieve candidate episodes.
@@ -53,10 +66,19 @@ HTTP `429` and transient `5xx` responses use bounded exponential backoff and res
 - `collect`: search Apple's public podcast-episode catalog for all active terms and retain source provenance.
 - `refresh-public`: refresh known public Xiaoyuzhou episode pages without credentials.
 - `sync-feeds`: poll public RSS feeds learned from Apple results.
-- `classify`: invoke local `codex exec` for one read-only batch. Selection uses available age-adjusted popularity, recency, trusted-show history, and a deterministic exploration lane—not keyword-overlap count. A JSON Schema constrains the response; unchanged episodes are skipped using a content hash.
+- `build-rss-registry`: resumably match historically relevant shows to Apple podcast entries and canonical public RSS feeds. Exact show-name matches are accepted; plausible collisions remain marked ambiguous for review.
+- `resolve-rss-registry`: inspect ambiguous candidate feeds and accept only a unique candidate supported by historical episode-title or audio-URL overlap.
+- `classify`: invoke local `codex exec` for one read-only batch. A cheap empirical gate admits candidates from trusted shows or active keywords with at least 50% smoothed historical precision, while reserving 10% of every ordinary batch for deterministic low-evidence exploration. Raw keyword-overlap count is not treated as relevance. A JSON Schema constrains the response; unchanged episodes are skipped using a content hash.
 - `fetch-transcripts`: fetch publisher-provided public RSS transcripts.
-- `transcribe`: download selected public audio and transcribe locally with faster-whisper; the default model is `large-v3-turbo`.
+- `transcribe`: download selected public audio and transcribe locally with OpenAI Whisper; the default configuration is `large-v3` on CUDA with FP16.
 - `score-quality`: apply the versioned `quality-v2.0` rubric to relevant episodes. Codex returns five evidence dimensions, penalty flags, and confidence; Python deterministically calculates the 0–10 score and derived tier. During calibration, this does not replace the production 0–3 tier.
+- `calibrate-quality`: create and resume a persisted 100-episode stratified sample (30 legacy Q3, 40 Q2, 20 Q1, and 10 roundup/promotional edge cases), preserving metadata-only and transcript-informed assessment runs for comparison.
+- `quality-rollout-status`: report transcript/review coverage and every blocker without changing production. `--mode hybrid` evaluates the safe staged policy that falls back to mapped legacy scores.
+- `quality-override`: record a versioned, attributed manual score and review reason.
+- `activate-quality-v2`: dry-run by default; `--apply` atomically switches consumers only when every gate passes. Choose `--mode strict` (complete v2 evidence) or `--mode hybrid` (reviewed/transcript v2, otherwise legacy fallback).
+- `rollback-quality`: atomically restores legacy quality sorting, filtering, and display.
+- `transcription-queue`: preview explainable ASR priorities before spending GPU time.
+- `discovery-recall-report`: measure known-relevant recovery from the latest complete active-keyword Apple replay.
 - `evolve`: propose repeated phrases only from episodes with `relevance_score >= 2`.
 - `curate-keywords`: use a schema-constrained Luna pass to rank a small candidate shortlist by expected marginal discovery value; it does not activate terms.
 - `probe-keywords`: search shortlisted terms without activating them and record their hits and marginal new-episode yield.
@@ -95,13 +117,32 @@ Fetch a publisher-provided RSS transcript, or transcribe one selected public epi
 
 ```bash
 python3 -m robotcast fetch-transcripts --max-episodes 1 --request-interval 4
-python3 -m robotcast transcribe --episode-id EPISODE_ID --model large-v3-turbo
+CUDA_VISIBLE_DEVICES=1 conda run -n robotcast-whisper-gpu python -m robotcast \
+  transcribe --episode-id EPISODE_ID --model large-v3 --fp16 --language zh
 python3 -m robotcast score-quality --max-episodes 1 --batch-size 1
+```
+
+Build the historical feed registry in conservative, resumable batches:
+
+```bash
+python3 -m robotcast build-rss-registry --max-shows 20 --request-interval 3
+python3 -m robotcast resolve-rss-registry --max-shows 10 --request-interval 3
+python3 -m robotcast sync-feeds --max-feeds 20 --max-episodes-per-feed 1000
+```
+
+For GPU transcription, use the isolated Conda environment:
+
+```bash
+conda activate robotcast-whisper-gpu
+CUDA_VISIBLE_DEVICES=1 python -m robotcast transcribe --episode-id EPISODE_ID --device cuda --fp16
 ```
 
 Transcripts are stored as compressed JSON under `.robotcast/transcripts/` and
 are never included in site or spreadsheet exports. Not every episode has an
 publisher transcript. Audio is downloaded only to a temporary directory for local ASR.
+Equal-priority ASR candidates are ordered by shortest duration first. Use
+`--max-duration-seconds` to impose a GPU budget; completed local runs record model,
+device, inference seconds, audio duration, and effective realtime factor in SQLite.
 
 Quality v2 scores five 0–2 dimensions—depth, specificity, expertise,
 originality, and structure—then applies explicit penalties for automated
@@ -109,6 +150,32 @@ roundups, promotion, broad news bundles, repackaging, insufficient evidence,
 extreme brevity, unsupported sensationalism, and duplicates. A confidence-zero
 assessment is capped at 4/10. The rubric and assessments are versioned so a
 calibration run does not reopen or overwrite the completed relevance queue.
+The paired calibration currently blocks a metadata-only rollout because boundary
+scores are strongly transcript-sensitive. See
+[`docs/quality-v2-rollout.md`](docs/quality-v2-rollout.md) for the evidence contract,
+atomic rollout, and rollback design.
+
+Inspect rollout readiness without changing production:
+
+```bash
+python3 -m robotcast quality-rollout-status
+python3 -m robotcast quality-rollout-status --mode hybrid
+python3 -m robotcast activate-quality-v2
+python3 -m robotcast activate-quality-v2 --mode hybrid
+```
+
+Activation requires the explicit `--apply` flag and still refuses while any gate is
+open. Reviewed exceptions require both attribution and a reason:
+
+```bash
+python3 -m robotcast quality-override EPISODE_ID 9 \
+  --reviewer REVIEWER --reason 'Transcript reviewed manually.'
+python3 -m robotcast activate-quality-v2 --mode hybrid --apply
+python3 -m robotcast rollback-quality
+```
+
+The hybrid command above is shown as the eventual staged activation path; production
+remains on `legacy` until the explicit `--apply` command is run.
 
 Search observations retain query, rank, page, run, and collection kind. Engagement
 observations retain the play/comment count and observation time, so overlapping monthly
@@ -116,26 +183,69 @@ runs refresh evidence without duplicating episodes or repeating unchanged LLM wo
 
 Useful options are available with `python3 -m robotcast --help` and per-command `--help`.
 
-## Result site deployment
-
-Authenticate once with EdgeOne's CLI credential store:
+Run the resumable auth-less update pipeline (production deployment remains separate):
 
 ```bash
-npx --yes edgeone@1.6.40 login
+scripts/manual_update.sh
+scripts/manual_update.sh --with-quality --with-transcription
 ```
 
-Then rebuild, validate, and create an isolated preview deployment:
+## Background queues
+
+Install user-level services for the monthly main pipeline, unattended
+transcription/classification, transcript-aware scoring, and site publication:
+
+```bash
+scripts/install_background_services.sh
+```
+
+The main refresh runs monthly and performs Apple discovery, full RSS synchronization,
+public-page enrichment, and publisher-transcript fetching. The transcription worker
+runs `large-v3` with FP16 on physical GPU 1 and processes
+up to 50 queued episodes per activation. The classifier processes bounded chunks of
+100 episodes with two concurrent Codex calls. SQLite eligibility and content hashes
+are the durable queues; command-level locks prevent duplicate workers. Timers rerun
+idle or completed queues every 10 and 15 minutes. A weekly main publication pass
+scores newly available transcripts, rebuilds and validates the static site, and
+publishes it when a GitHub remote is configured. Ad-hoc publication remains
+available at any time.
+
+Monitor or stop them with:
+
+```bash
+systemctl --user status robotcast-transcribe.timer robotcast-classify.timer
+scripts/robotcast_service.sh status
+scripts/robotcast_service.sh logs
+scripts/robotcast_service.sh refresh  # ad-hoc full auth-less refresh
+scripts/robotcast_service.sh publish  # ad-hoc score/build/publish
+```
+
+For this workload, one Whisper process per GPU is the recommended default. Running
+multiple `large-v3` models on one 24 GB GPU adds memory pressure and usually provides
+little throughput benefit. A second GPU is useful only as a separate worker after
+adding atomic job claims; the current single-worker lock intentionally favors simple,
+reliable overnight operation.
+
+Successful stages are recorded in `.robotcast/manual-update.state`; rerunning after a
+failure resumes at the first unfinished stage. `ROBOTCAST_CLASSIFY_LIMIT` bounds the
+classification stage and defaults to 100 episodes.
+
+## Result site deployment
+
+Set the target repository in the private service environment file:
+
+```bash
+echo 'ROBOTCAST_PAGES_REMOTE=git@github.com:OWNER/REPOSITORY.git' \
+  >> ~/.config/robotcast/robotcast.env
+```
+
+Configure GitHub Pages once to deploy from the `gh-pages` branch, then rebuild,
+validate, and publish ad hoc with:
 
 ```bash
 scripts/update_result_site.sh
 ```
 
-Publish the same workflow explicitly to production:
-
-```bash
-scripts/update_result_site.sh --production
-```
-
-For CI, set `EDGEONE_API_TOKEN` in the CI secret store. The script passes it directly
-to EdgeOne and never writes it into the repository or generated site. Override the
-default project with `EDGEONE_PROJECT_NAME` or `--project` when needed.
+The same publication path is invoked automatically once per week. It commits only
+when generated content changed. Collection, SQLite, Codex, and Whisper remain local;
+only validated static files are pushed to `gh-pages`.

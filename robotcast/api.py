@@ -59,6 +59,14 @@ class ApplePodcastClient(PublicClient):
         response = self.get_json("https://itunes.apple.com/search?" + query)
         yield [normalize_apple_episode(item) for item in response.get("results", [])]
 
+    def search_podcasts(self, name: str, limit: int = 10,
+                        country: str | None = None) -> list[dict]:
+        query = urllib.parse.urlencode({"term": name, "media": "podcast",
+            "entity": "podcast", "country": country or self.country,
+            "limit": min(25, limit)})
+        response = self.get_json("https://itunes.apple.com/search?" + query)
+        return response.get("results", [])
+
 
 class PublicXiaoyuzhouClient(PublicClient):
     NEXT_DATA = re.compile(rb'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S)

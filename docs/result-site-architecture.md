@@ -2,16 +2,14 @@
 
 ## Status
 
-Proposed design for discussion. This document does not imply that collection or
-publishing should run on a schedule.
+Implemented local-service design with scheduled collection and GitHub Pages publishing.
 
 ## Goals
 
 - Publish the curated robotics and embodied-AI podcast corpus as a simple result
   browser.
-- Host the generated site on Tencent EdgeOne Pages.
-- Let a Codex session explicitly start data collection, classification, site
-  generation, and deployment.
+- Host the generated site on GitHub Pages.
+- Run auth-less discovery monthly while retaining ad-hoc triggers.
 - Keep the initial page download small and fast, including on mobile networks.
 - Keep credentials, the SQLite database, collection history, and classifier
   internals private.
@@ -36,7 +34,7 @@ Codex classifier ------------+
                           site-dist/
                               |
                               v
-                    Tencent EdgeOne Pages
+                         GitHub Pages
 ```
 
 This separation makes the public site inexpensive, cacheable, and independent
@@ -144,23 +142,19 @@ classified corpus; it is separate from the collector's discovery mechanism.
 
 ## Update and deployment workflow
 
-Collection is always manually initiated from a local Codex
-session. The recommended workflow is:
+Three local service roles share SQLite as the durable coordination boundary:
 
 ```text
-1. update data      API requests and classification, resumable
-2. build site       deterministic read from SQLite into site-dist/
-3. inspect summary  counts, exclusions, size, and validation results
-4. deploy site      explicit EdgeOne production deployment
+1. main             monthly discovery/RSS/enrichment and periodic site publication
+2. classifier       bounded, resumable Codex classification batches
+3. transcript       one OpenAI Whisper large-v3 FP16 process on GPU 1
 ```
 
-Expose the stages independently before adding a convenience wrapper:
+The same paths support ad-hoc operation:
 
 ```bash
-python -m robotcast update-data
-python -m robotcast build-site --output site-dist
-python -m robotcast validate-site --directory site-dist
-npx edgeone pages deploy ./site-dist -n <project-name> -e production
+scripts/robotcast_service.sh refresh
+scripts/robotcast_service.sh publish
 ```
 
 The exact `update-data` orchestration can reuse `collect`, `sync-feeds`,
@@ -174,32 +168,16 @@ unless deployment is explicitly requested. Generation must be safe to rerun;
 overlapping collection results update existing records rather than duplicating
 them.
 
-## EdgeOne Pages deployment choice
+## GitHub Pages deployment
 
-Tencent EdgeOne Pages supports deploying a directory of static build artifacts,
-and the directory must contain `index.html`. It also supports Git repository
-integration and GitHub Actions, but neither is required for this workflow.
+The local main service builds and validates `site-dist/`, then copies only those
+static artifacts into a temporary checkout of the target repository's `gh-pages`
+branch. A normal non-force push publishes changed content. The 533 MB SQLite database,
+transcript cache, locks, logs, Codex execution, and GPU processing never enter GitHub.
 
-The recommended initial approach is direct CLI deployment of `site-dist/`:
-
-- it matches the manually triggered Codex workflow;
-- it avoids putting Xiaoyuzhou credentials or LLM execution in cloud CI;
-- collection and classification remain on the local machine;
-- production publication remains an explicit action.
-
-The EdgeOne API token should be supplied through the process environment or the
-CLI's authenticated credential store. It must not be written to this repository,
-the generated site, shell scripts, or command output captured as an artifact.
-
-A Git-connected EdgeOne project remains an optional later choice if source
-history and push-to-deploy are desired. Even then, cloud CI should publish only
-already generated static files; it should not collect or classify data.
-
-Official references:
-
-- [EdgeOne Pages framework and output-directory overview](https://pages.edgeone.ai/document/framework-overview)
-- [EdgeOne Pages CLI deployment through GitHub Actions](https://pages.edgeone.ai/document/use-github-actions)
-- [EdgeOne deployment artifact documentation](https://pages.edgeone.ai/document/deployment)
+The repository URL is read from the private user-service environment as
+`ROBOTCAST_PAGES_REMOTE`. If it is absent, the scheduled pass still scores, builds,
+and validates locally but safely skips the external publication.
 
 ## Validation gates
 
@@ -226,7 +204,7 @@ not affect the local database or the previously published production version.
    details.
 4. Add output-size and data-policy validation.
 5. Preview and visually verify desktop and mobile layouts.
-6. Create the EdgeOne Pages project and perform an explicit first deployment.
+6. Configure the GitHub repository to serve its `gh-pages` branch.
 7. Add the optional agent-facing update harness after the individual commands
    have been exercised successfully.
 
@@ -234,8 +212,7 @@ not affect the local database or the previously published production version.
 
 These do not block the first implementation:
 
-- custom domain versus the default EdgeOne domain;
+- custom domain versus the default GitHub Pages domain;
 - whether matched discovery keywords should be public;
-- whether Git should later become the deployment source;
 - analytics or privacy-preserving traffic measurement;
 - URL-addressable episode detail pages for sharing and search-engine indexing.

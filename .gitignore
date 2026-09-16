@@ -12,9 +12,8 @@ tools/.artifact-runtime/
 *.xlsx
 *.csv
 *.ndjson
+*.egg-info/
 .~lock.*
-
-# Tencent Cloud EdgeOne
 .env
-.edgeone/*
-.tef_dist/*
+config/*.env
+!config/*.env.example

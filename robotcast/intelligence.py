@@ -67,11 +67,17 @@ def pending_batch(conn, limit: int = 10, min_matches: int = 1,
                   min_plays: int | None = None,
                   min_popularity: float | None = None,
                   popularity_grace_days: int = 14) -> list[dict]:
-    # min_matches/match_source remain accepted for CLI compatibility, but keyword
-    # overlap is deliberately not used to select or rank episodes.
-    result = []
+    # min_matches/match_source remain accepted for CLI compatibility. Raw overlap
+    # count is not a relevance proxy; observed per-keyword precision is.
+    primary, exploration = [], []
+    existing_assessments = {
+        row["episode_id"]: row for row in conn.execute(
+            "SELECT episode_id,content_hash,quality_score FROM episode_classifications")
+    }
     for candidate in ranked_candidates(conn, episode_ids=episode_ids):
         row = candidate["row"]
+        if not candidate["prefilter_pass"]:
+            continue
         if only_relevant and row["relevance_score"] is None:
             continue
         if only_relevant and row["relevance_score"] < 2:
@@ -83,21 +89,32 @@ def pending_batch(conn, limit: int = 10, min_matches: int = 1,
             is_recent = days is not None and days <= popularity_grace_days
             if not is_recent and candidate["age_popularity_percentile"] < min_popularity:
                 continue
-        existing = conn.execute("""SELECT content_hash,quality_score
-          FROM episode_classifications WHERE episode_id=?""", (row["episode_id"],)).fetchone()
+        existing = existing_assessments.get(row["episode_id"])
         digest = content_hash(row)
         if existing and existing["content_hash"] == digest and existing["quality_score"] is not None:
             continue
-        result.append({
+        item = {
             "episode_id": row["episode_id"], "podcast_name": row["podcast_name"],
             "title": row["title"], "description": (row["description"] or "")[:8000],
             "content_hash": digest,
             "selection_reason": candidate["selection_reason"],
             "priority_score": candidate["priority_score"],
             "age_popularity_percentile": candidate["age_popularity_percentile"],
-        })
-        if len(result) >= limit:
-            break
+            "prefilter_reason": candidate["prefilter_reason"],
+            "keyword_precision": candidate["keyword_precision"],
+        }
+        (exploration if candidate["prefilter_reason"] == "exploration"
+         else primary).append(item)
+    # A reserved low-evidence audit lane prevents high-priority candidates from
+    # starving exploration indefinitely. Explicit and quality-backfill requests
+    # remain exact rather than being mixed with unrelated audit records.
+    audit_slots = 0 if episode_ids or only_relevant else max(1, limit // 10)
+    result = primary[:max(0, limit - audit_slots)] + exploration[:audit_slots]
+    if len(result) < limit:
+        used = {item["episode_id"] for item in result}
+        result.extend(item for item in primary + exploration
+                      if item["episode_id"] not in used)
+        result = result[:limit]
     for number, item in enumerate(result, 1):
         item["request_id"] = f"E{number:03d}"
     return result
@@ -180,9 +197,11 @@ def validate_and_import(conn, batch: list[dict], result: dict, classifier: str) 
           WHERE episode_id=?""", (score, quality, quality_reason.strip(), eid))
         item = expected[request_id]
         conn.execute("""INSERT INTO classification_selections
-          (episode_id,reason,priority_score,age_popularity_percentile) VALUES(?,?,?,?)""",
+          (episode_id,reason,priority_score,age_popularity_percentile,
+           prefilter_reason,keyword_precision) VALUES(?,?,?,?,?,?)""",
           (eid, item.get("selection_reason", "legacy"), item.get("priority_score", 0),
-           item.get("age_popularity_percentile")))
+           item.get("age_popularity_percentile"), item.get("prefilter_reason"),
+           item.get("keyword_precision")))
         if score >= 2:
             for term in {value.strip() for value in suggestions if value.strip()}:
                 evidence = json.dumps([expected[request_id]["title"]], ensure_ascii=False)

@@ -1,0 +1,12 @@
+[Unit]
+Description=Robotcast main pipeline (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@PROJECT_DIR@
+Environment=PATH=@CONDA_DIR@:@CODEX_DIR@:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/robotcast/robotcast.env
+ExecStart=@PROJECT_DIR@/scripts/main_worker.sh %i
+Nice=10

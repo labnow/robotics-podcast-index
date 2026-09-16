@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Robotcast classifier queue periodically
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=15min
+Persistent=true
+Unit=robotcast-classify.service
+
+[Install]
+WantedBy=timers.target
