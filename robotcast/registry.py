@@ -220,6 +220,76 @@ def resolve_ambiguous_registry(conn, client, max_shows: int = 10,
     return report
 
 
+def recover_registry_from_episodes(conn, client, max_shows: int = 20,
+                                   queries_per_show: int = 2,
+                                   page_size: int = 50) -> dict[str, int]:
+    """Recover Apple feeds for name-search misses using exact historical titles."""
+    rows = conn.execute("""SELECT r.*,
+      (SELECT count(*) FROM episodes e WHERE e.normalized_podcast_name=r.normalized_name
+        AND e.relevance_score>=2) relevant_count
+      FROM podcast_registry r WHERE r.match_status='not_found'
+      ORDER BY relevant_count DESC,r.podcast_name COLLATE NOCASE LIMIT ?""",
+      (max_shows,)).fetchall()
+    report = {"attempted": 0, "matched": 0, "unresolved": 0, "errors": 0}
+    for row in rows:
+        report["attempted"] += 1
+        titles = conn.execute("""SELECT title,normalized_title FROM episodes
+          WHERE normalized_podcast_name=? AND relevance_score>=2
+            AND normalized_title<>'' ORDER BY length(title) DESC,published_at DESC
+          LIMIT ?""", (row["normalized_name"], queries_per_show)).fetchall()
+        known = {item["normalized_title"] for item in titles}
+        feeds: dict[str, dict] = {}
+        try:
+            for title in titles:
+                for page in client.search_pages(title["title"], 1, page_size):
+                    for episode in page:
+                        feed = normalize_url(episode.get("feedUrl"))
+                        if not feed or normalize_title(episode.get("title")) not in known:
+                            continue
+                        candidate = feeds.setdefault(feed, {"feedUrl": feed,
+                            "collectionId": (episode.get("podcast") or {}).get("pid"),
+                            "collectionName": (episode.get("podcast") or {}).get("title"),
+                            "titleHits": set()})
+                        candidate["titleHits"].add(normalize_title(episode.get("title")))
+            ranked = sorted(feeds.values(), key=lambda item: (
+                -len(item["titleHits"]),
+                -_candidate_score(row["normalized_name"], {
+                    "collectionName": item["collectionName"]}), item["feedUrl"]))
+            accepted = []
+            for item in ranked:
+                show_score = _candidate_score(row["normalized_name"], {
+                    "collectionName": item["collectionName"]})
+                if len(item["titleHits"]) >= 2 or (
+                        len(item["titleHits"]) == 1 and show_score >= .72):
+                    accepted.append((item, show_score))
+            unique_feeds = {item[0]["feedUrl"] for item in accepted}
+            chosen = accepted[0] if len(unique_feeds) == 1 else None
+            compact = [{"feedUrl": item["feedUrl"],
+                        "collectionId": item["collectionId"],
+                        "collectionName": item["collectionName"],
+                        "titleHits": len(item["titleHits"]), "score": score}
+                       for item, score in accepted[:5]]
+            if chosen:
+                item, score = chosen
+                conn.execute("""UPDATE podcast_registry SET apple_collection_id=?,
+                  feed_url=?,match_status='matched',match_score=?,candidates_json=?,
+                  error=NULL,updated_at=CURRENT_TIMESTAMP WHERE podcast_key=?""",
+                  (item["collectionId"], item["feedUrl"], score,
+                   json.dumps(compact, ensure_ascii=False), row["podcast_key"]))
+                conn.execute("""INSERT OR IGNORE INTO feed_aliases
+                  (alias_url,canonical_url,source) VALUES(?,?,?)""",
+                  (item["feedUrl"], item["feedUrl"], "episode_title_recovery"))
+                report["matched"] += 1
+            else:
+                report["unresolved"] += 1
+        except Exception as exc:
+            conn.execute("""UPDATE podcast_registry SET error=?,updated_at=CURRENT_TIMESTAMP
+              WHERE podcast_key=?""", (str(exc)[:1000], row["podcast_key"]))
+            report["errors"] += 1
+        conn.commit()
+    return report
+
+
 def registry_coverage_report(conn) -> dict[str, int | float]:
     """Summarize historical-show and episode recovery without network access."""
     shows = conn.execute("SELECT count(*) FROM podcast_registry").fetchone()[0]

@@ -23,7 +23,8 @@ from .transcripts import fetch_public_transcripts
 from .transcribe import transcribe_public_audio
 from .rss import sync_feeds
 from .registry import (build_historical_registry, resolve_ambiguous_registry,
-                       registry_coverage_report, seed_historical_registry)
+                       recover_registry_from_episodes, registry_coverage_report,
+                       seed_historical_registry)
 from .recall import apple_recall_report
 
 
@@ -165,6 +166,13 @@ def parser() -> argparse.ArgumentParser:
     resolve_registry.add_argument("--max-shows", type=int, default=10)
     resolve_registry.add_argument("--max-items", type=int, default=100)
     resolve_registry.add_argument("--request-interval", type=float, default=3.0)
+    recover_registry = sub.add_parser("recover-rss-registry",
+        help="Recover name-search misses using known episode titles")
+    recover_registry.add_argument("--max-shows", type=int, default=20)
+    recover_registry.add_argument("--queries-per-show", type=int, default=2)
+    recover_registry.add_argument("--page-size", type=int, default=50)
+    recover_registry.add_argument("--country", default="cn")
+    recover_registry.add_argument("--request-interval", type=float, default=3.0)
     sub.add_parser("registry-report",
                    help="Report historical RSS and episode-identity coverage")
     sub.add_parser("discovery-recall-report",
@@ -398,6 +406,12 @@ def main() -> None:
         report = resolve_ambiguous_registry(conn, ApplePodcastClient(args.request_interval),
                                             args.max_shows, args.max_items)
         print("RSS registry review: " + ", ".join(f"{k}={v}" for k, v in report.items()))
+    elif args.command == "recover-rss-registry":
+        report = recover_registry_from_episodes(conn,
+            ApplePodcastClient(args.request_interval, country=args.country),
+            args.max_shows, args.queries_per_show, args.page_size)
+        print("RSS registry episode recovery: " + ", ".join(
+            f"{k}={v}" for k, v in report.items()))
     elif args.command == "registry-report":
         report = registry_coverage_report(conn)
         print("RSS registry coverage: " + ", ".join(

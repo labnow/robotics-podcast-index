@@ -16,7 +16,9 @@ from robotcast.quality import (RUBRIC_VERSION, calculate_quality,
                                validate_and_import as import_quality)
 from robotcast.transcripts import fetch_public_transcripts
 from robotcast.matching import duration_close, normalize_title
-from robotcast.registry import (build_historical_registry, registry_coverage_report,
+from robotcast.registry import (build_historical_registry,
+                                recover_registry_from_episodes,
+                                registry_coverage_report,
                                 resolve_ambiguous_registry)
 from robotcast.recall import apple_recall_report
 
@@ -204,6 +206,23 @@ class CoreTests(unittest.TestCase):
         aliases = self.conn.execute("""SELECT count(*) FROM feed_aliases
           WHERE canonical_url='https://feed.xyzfm.space/canonical'""").fetchone()[0]
         self.assertEqual(aliases, 2)
+
+    def test_registry_recovers_name_miss_from_episode_titles(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        for eid, title in (("a", "机器人的触觉原理"), ("b", "灵巧手训练方法")):
+            upsert_episode(self.conn, {"eid": eid, "title": title,
+                "podcast": {"title": "DeepTalk"}}, "机器人")
+            self.conn.execute("UPDATE episodes SET relevance_score=3 WHERE episode_id=?", (eid,))
+        build_historical_registry(self.conn, type("Shows", (), {
+            "search_podcasts": lambda self, name, limit: []})(), 1)
+        class Episodes:
+            def search_pages(self, title, max_pages, page_size):
+                yield [{"title": title, "feedUrl": "https://feed.example/rss",
+                    "podcast": {"pid": "7", "title": "Deep Talk"}}]
+        report = recover_registry_from_episodes(self.conn, Episodes(), 1, 2)
+        self.assertEqual((report["matched"], report["unresolved"]), (1, 0))
+        row = self.conn.execute("SELECT match_status,feed_url FROM podcast_registry").fetchone()
+        self.assertEqual(tuple(row), ("matched", "https://feed.example/rss"))
 
     def test_registry_coverage_report(self):
         install_seeds(self.conn, {"core": ["机器人"]})
