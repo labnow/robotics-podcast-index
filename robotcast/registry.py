@@ -57,6 +57,18 @@ def _candidate_score(expected: str, candidate: dict) -> float:
     return round(max(ratio, .9 if contained else 0), 3)
 
 
+def _unique_candidates(pairs: list[tuple[dict, float]]) -> list[tuple[dict, float]]:
+    """Collapse duplicate Apple listings that point at the same canonical feed."""
+    unique: dict[str, tuple[dict, float]] = {}
+    for item, score in pairs:
+        feed = normalize_url(item.get("feedUrl"))
+        key = feed or f"apple:{item.get('collectionId')}"
+        previous = unique.get(key)
+        if previous is None or score > previous[1]:
+            unique[key] = (item, score)
+    return sorted(unique.values(), key=lambda pair: pair[1], reverse=True)
+
+
 def build_historical_registry(conn, client, max_shows: int = 20,
                               retry_errors: bool = False,
                               retry_not_found: bool = False) -> dict[str, int]:
@@ -83,7 +95,8 @@ def build_historical_registry(conn, client, max_shows: int = 20,
                 candidates.extend(item for item in us if item.get("collectionId") not in known)
             ranked = sorted(((item, _candidate_score(row["normalized_name"], item))
                              for item in candidates), key=lambda pair: pair[1], reverse=True)
-            plausible = [(item, score) for item, score in ranked if score >= .72]
+            plausible = _unique_candidates(
+                [(item, score) for item, score in ranked if score >= .72])
             exact = [(item, score) for item, score in plausible if score == 1]
             chosen = exact[0] if len(exact) == 1 else (plausible[0] if len(plausible) == 1 else None)
             status = "matched" if chosen else ("ambiguous" if plausible else "not_found")
@@ -149,8 +162,10 @@ def resolve_ambiguous_registry(conn, client, max_shows: int = 10,
           WHERE e.normalized_podcast_name=? AND s.audio_url IS NOT NULL""",
           (row["normalized_name"],))}
         candidates = json.loads(row["candidates_json"])
+        unique_candidates = [item for item, _ in _unique_candidates(
+            [(item, float(item.get("score") or 0)) for item in candidates])]
         scored = []
-        for candidate in candidates:
+        for candidate in unique_candidates:
             feed = candidate.get("feedUrl")
             if not feed:
                 continue
@@ -165,14 +180,20 @@ def resolve_ambiguous_registry(conn, client, max_shows: int = 10,
         scored.sort(key=lambda pair: pair[0], reverse=True)
         best = scored[0] if scored else None
         runner_up = scored[1][0] if len(scored) > 1 else 0
+        tied = [pair for pair in scored if best and pair[0] == best[0]]
+        mirrored = bool(len(tied) > 1 and best and best[0] > 0 and all(
+            item[1]["evidence"]["audioHits"] >= 1 or
+            item[1]["evidence"]["titleHits"] >= 2 for item in tied))
         # One audio identity or two exact episode-title identities are enough;
         # a single title is accepted only when every other candidate has none.
-        resolved = bool(best and best[0] > runner_up and
-                        (best[1]["evidence"]["audioHits"] >= 1 or
-                         best[1]["evidence"]["titleHits"] >= 2 or
-                         (best[1]["evidence"]["titleHits"] == 1 and runner_up == 0)))
+        resolved = mirrored or bool(best and best[0] > runner_up and
+            (best[1]["evidence"]["audioHits"] >= 1 or
+             best[1]["evidence"]["titleHits"] >= 2 or
+             (best[1]["evidence"]["titleHits"] == 1 and runner_up == 0)))
         if resolved:
-            candidate = best[1]
+            candidate = (next((item[1] for item in tied
+                               if "feed.xyzfm.space" in item[1].get("feedUrl", "")),
+                              best[1]) if mirrored else best[1])
             feed = normalize_url(candidate["feedUrl"])
             conn.execute("""UPDATE podcast_registry SET apple_collection_id=?,feed_url=?,
               match_status='matched',match_score=1.0,candidates_json=?,error=NULL,
@@ -181,6 +202,13 @@ def resolve_ambiguous_registry(conn, client, max_shows: int = 10,
                json.dumps(candidates, ensure_ascii=False), row["podcast_key"]))
             conn.execute("INSERT OR IGNORE INTO feed_aliases(alias_url,canonical_url,source) VALUES(?,?,?)",
                          (feed, feed, "episode_evidence"))
+            if mirrored:
+                for _, mirror in tied:
+                    alias = normalize_url(mirror.get("feedUrl"))
+                    if alias:
+                        conn.execute("""INSERT OR IGNORE INTO feed_aliases
+                          (alias_url,canonical_url,source) VALUES(?,?,?)""",
+                          (alias, feed, "mirrored_episode_evidence"))
             report["resolved"] += 1
         else:
             conn.execute("""UPDATE podcast_registry SET candidates_json=?,

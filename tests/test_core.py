@@ -110,6 +110,26 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT count(*) FROM match_review_queue WHERE status='pending'").fetchone()[0], 1)
 
+    def test_rss_guid_matching_precedes_reused_audio(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        shared = "https://audio/shared.mp3"
+        upsert_episode(self.conn, {"eid": "canonical-a", "title": "同一音频",
+            "audioUrl": shared, "podcast": {"title": "日报"}}, "机器人")
+        self.conn.execute("""INSERT INTO episodes
+          (episode_id,podcast_name,title,url,raw_json,normalized_title,
+           normalized_podcast_name) VALUES
+          ('canonical-b','日报','同一音频','https://canonical-b','{}','同一音频','日报')""")
+        incoming = {"eid": "rss-new", "source": "rss",
+            "sourceEpisodeId": "canonical-b", "rssGuid": "canonical-b",
+            "title": "同一音频", "audioUrl": shared,
+            "podcast": {"title": "日报"}}
+        self.assertFalse(upsert_episode(self.conn, incoming, "机器人"))
+        source = self.conn.execute("""SELECT episode_id FROM episode_sources
+          WHERE source='rss' AND source_episode_id='canonical-b'""").fetchone()
+        self.assertEqual(source[0], "canonical-b")
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM match_review_queue").fetchone()[0], 0)
+
     def test_historical_registry_is_resumable(self):
         install_seeds(self.conn, {"core": ["机器人"]})
         upsert_episode(self.conn, {"eid": "legacy", "title": "机器人访谈",
@@ -125,6 +145,20 @@ class CoreTests(unittest.TestCase):
         self.assertEqual((first["matched"], second["attempted"]), (1, 0))
         row = self.conn.execute("SELECT match_status,feed_url FROM podcast_registry").fetchone()
         self.assertEqual(tuple(row), ("matched", "https://example.com/feed.xml"))
+
+    def test_registry_collapses_duplicate_apple_listings_for_one_feed(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        upsert_episode(self.conn, {"eid": "legacy", "title": "机器人访谈",
+            "podcast": {"title": "机器人电台"}}, "机器人")
+        self.conn.execute("UPDATE episodes SET relevance_score=3")
+        client = type("Search", (), {"search_podcasts": lambda self, name, limit: [
+            {"collectionId": 7, "collectionName": "机器人电台",
+             "feedUrl": "http://example.com/feed.xml"},
+            {"collectionId": 8, "collectionName": "机器人电台",
+             "feedUrl": "https://example.com/feed.xml"},
+        ]})()
+        report = build_historical_registry(self.conn, client, 1)
+        self.assertEqual((report["matched"], report["ambiguous"]), (1, 0))
 
     def test_ambiguous_registry_resolves_from_episode_evidence(self):
         install_seeds(self.conn, {"core": ["机器人"]})
@@ -146,6 +180,30 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(report["resolved"], 1)
         row = self.conn.execute("SELECT match_status,apple_collection_id,feed_url FROM podcast_registry").fetchone()
         self.assertEqual(tuple(row), ("matched", "2", "https://right/"))
+
+    def test_registry_accepts_strongly_evidenced_feed_mirrors(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        for eid, title in (("a", "机器人的触觉"), ("b", "灵巧手训练")):
+            upsert_episode(self.conn, {"eid": eid, "title": title,
+                "podcast": {"title": "DeepTalk"}}, "机器人")
+            self.conn.execute("UPDATE episodes SET relevance_score=3 WHERE episode_id=?", (eid,))
+        build_historical_registry(self.conn, type("Search", (), {
+            "search_podcasts": lambda self, name, limit: [
+                {"collectionId": 1, "collectionName": "Deep Talk",
+                 "feedUrl": "https://mirror.example/feed"},
+                {"collectionId": 2, "collectionName": "deep talk",
+                 "feedUrl": "https://feed.xyzfm.space/canonical"}],
+        })(), 1)
+        class Feeds:
+            def get_bytes(self, url):
+                return ("<rss><channel><item><title>机器人的触觉</title></item>"
+                        "<item><title>灵巧手训练</title></item></channel></rss>").encode()
+        self.assertEqual(resolve_ambiguous_registry(self.conn, Feeds(), 1)["resolved"], 1)
+        row = self.conn.execute("SELECT match_status,feed_url FROM podcast_registry").fetchone()
+        self.assertEqual(tuple(row), ("matched", "https://feed.xyzfm.space/canonical"))
+        aliases = self.conn.execute("""SELECT count(*) FROM feed_aliases
+          WHERE canonical_url='https://feed.xyzfm.space/canonical'""").fetchone()[0]
+        self.assertEqual(aliases, 2)
 
     def test_registry_coverage_report(self):
         install_seeds(self.conn, {"core": ["机器人"]})

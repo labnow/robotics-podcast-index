@@ -68,6 +68,22 @@ def find_episode_match(conn, ep: dict) -> MatchResult:
     guid = str(ep.get("rssGuid") or "").strip() or None
     feed = normalize_url(ep.get("feedUrl"))
 
+    # Xiaoyuzhou-derived feeds commonly use the canonical episode ID as the RSS
+    # GUID. Prefer that exact identity before audio matching because publishers
+    # may intentionally reuse one audio file for two separately published items.
+    if guid:
+        row = conn.execute(
+            "SELECT episode_id FROM episodes WHERE episode_id=?", (guid,)
+        ).fetchone()
+        if row:
+            return MatchResult(row[0], "matched", "exact_episode_id", 1.0)
+        rows = conn.execute(
+            "SELECT DISTINCT episode_id FROM episode_sources WHERE source_episode_id=?",
+            (guid,),
+        ).fetchall()
+        if len(rows) == 1:
+            return MatchResult(rows[0][0], "matched", "exact_source_id", 1.0)
+
     if audio:
         rows = conn.execute(
             "SELECT DISTINCT episode_id FROM episode_sources WHERE normalized_audio_url=?",
