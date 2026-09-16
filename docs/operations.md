@@ -2,8 +2,9 @@
 
 ## Service roles
 
-- `robotcast-main@refresh`: monthly Apple discovery, RSS synchronization,
-  public-page enrichment, and publisher transcript fetching.
+- `robotcast-main@refresh`: monthly Apple discovery, historical RSS registry
+  recovery/review, RSS synchronization, public-page enrichment, and publisher
+  transcript fetching.
 - `robotcast-classify`: resumable Codex classification batches.
 - `robotcast-transcribe`: OpenAI Whisper `large-v3`, FP16, physical GPU 1.
 - `robotcast-main@publish`: weekly transcript-aware quality scoring, static-site

@@ -14,6 +14,15 @@ case "$mode" in
     flock -n 9 || { printf '%s\n' 'A main refresh is already running'; exit 0; }
     "${python_runner[@]}" -m robotcast --db "$database_path" collect \
       --page-size 200 --request-interval "${ROBOTCAST_REQUEST_INTERVAL:-3}"
+    "${python_runner[@]}" -m robotcast --db "$database_path" build-rss-registry \
+      --max-shows 400 --retry-errors --retry-not-found \
+      --request-interval "${ROBOTCAST_REQUEST_INTERVAL:-3}"
+    "${python_runner[@]}" -m robotcast --db "$database_path" resolve-rss-registry \
+      --max-shows 100 --max-items 200 \
+      --request-interval "${ROBOTCAST_REQUEST_INTERVAL:-3}"
+    "${python_runner[@]}" -m robotcast --db "$database_path" recover-rss-registry \
+      --max-shows 50 --queries-per-show 2 --page-size 50 \
+      --request-interval "${ROBOTCAST_REQUEST_INTERVAL:-3}"
     "${python_runner[@]}" -m robotcast --db "$database_path" sync-feeds \
       --max-feeds 10000 --max-episodes-per-feed 10000 \
       --request-interval "${ROBOTCAST_REQUEST_INTERVAL:-3}"

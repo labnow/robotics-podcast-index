@@ -68,6 +68,9 @@ HTTP `429` and transient `5xx` responses use bounded exponential backoff and res
 - `sync-feeds`: poll public RSS feeds learned from Apple results.
 - `build-rss-registry`: resumably match historically relevant shows to Apple podcast entries and canonical public RSS feeds. Exact show-name matches are accepted; plausible collisions remain marked ambiguous for review.
 - `resolve-rss-registry`: inspect ambiguous candidate feeds and accept only a unique candidate supported by historical episode-title or audio-URL overlap.
+- `recover-rss-registry`: retry Apple feed discovery for name-search misses using
+  distinctive known episode titles; accept only exact episode evidence plus a
+  compatible show identity, or at least two exact episode-title identities.
 - `classify`: invoke local `codex exec` for one read-only batch. A cheap empirical gate admits candidates from trusted shows or active keywords with at least 50% smoothed historical precision, while reserving 10% of every ordinary batch for deterministic low-evidence exploration. Raw keyword-overlap count is not treated as relevance. A JSON Schema constrains the response; unchanged episodes are skipped using a content hash.
 - `fetch-transcripts`: fetch publisher-provided public RSS transcripts.
 - `transcribe`: download selected public audio and transcribe locally with OpenAI Whisper; the default configuration is `large-v3` on CUDA with FP16.
