@@ -180,6 +180,9 @@ CREATE TABLE IF NOT EXISTS episode_transcripts (
   ,realtime_factor REAL
   ,model_name TEXT
   ,device TEXT
+  ,transcription_backend TEXT
+  ,compute_type TEXT
+  ,batch_size INTEGER
 );
 CREATE TABLE IF NOT EXISTS transcription_claims (
   episode_id TEXT PRIMARY KEY REFERENCES episodes(episode_id) ON DELETE CASCADE,
@@ -302,6 +305,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("realtime_factor", "REAL"),
         ("model_name", "TEXT"),
         ("device", "TEXT"),
+        ("transcription_backend", "TEXT"),
+        ("compute_type", "TEXT"),
+        ("batch_size", "INTEGER"),
     ):
         if name not in transcript_columns:
             conn.execute(f"ALTER TABLE episode_transcripts ADD COLUMN {name} {definition}")

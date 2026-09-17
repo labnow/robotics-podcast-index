@@ -72,6 +72,17 @@ class CoreTests(unittest.TestCase):
         finally:
             other.close()
 
+    def test_publisher_no_subtitle_is_eligible_for_local_asr(self):
+        install_seeds(self.conn, {"core": ["机器人"]})
+        upsert_episode(self.conn, {"eid": "no-publisher-subtitle", "title": "机器人",
+            "audioUrl": "https://audio/episode.mp3"}, "机器人")
+        self.conn.execute("UPDATE episodes SET relevance_score=3")
+        self.conn.execute("""INSERT INTO episode_transcripts(episode_id,status)
+          VALUES('no-publisher-subtitle','no_subtitle')""")
+        self.conn.commit()
+        rows = transcription_candidates(self.conn, 10)
+        self.assertEqual([row["episode_id"] for row in rows], ["no-publisher-subtitle"])
+
     def test_apple_search_normalizes_authless_episode(self):
         client = ApplePodcastClient(request_interval=0)
         client.get_json = lambda url: {"results": [{"trackId": 42, "trackName": "机器人",

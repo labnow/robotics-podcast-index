@@ -9,7 +9,7 @@ def transcription_candidates(conn, limit: int = 20,
     """Return a bounded, explainable ASR queue ordered by expected value."""
     params: list[object] = []
     where = ["e.relevance_score>=2", "s.audio_url IS NOT NULL",
-             "(t.episode_id IS NULL OR (t.status='error' AND "
+             "(t.episode_id IS NULL OR t.status='no_subtitle' OR (t.status='error' AND "
              "t.last_attempt_at<datetime('now','-1 day')))" ]
     if episode_ids:
         where.append(f"e.episode_id IN ({','.join('?' for _ in episode_ids)})")

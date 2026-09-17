@@ -35,6 +35,31 @@ systemctl --user enable --now robotcast-transcribe@0.timer
 systemctl --user enable --now robotcast-transcribe@1.timer
 ```
 
+Use the convenience wrapper for normal daytime/nighttime operation. One-card
+mode reserves GPU 0 for other work and keeps transcription on physical GPU 1:
+
+```bash
+scripts/transcription_mode.sh one    # GPU 1 only
+scripts/transcription_mode.sh two    # GPU 0 + GPU 1
+scripts/transcription_mode.sh off
+scripts/transcription_mode.sh status
+```
+
+The production backend is selected in `~/.config/robotcast/robotcast.env`.
+Faster-whisper uses an isolated environment and defaults to a conservative FP16
+batch size of four:
+
+```bash
+ROBOTCAST_TRANSCRIBE_BACKEND=faster-whisper
+ROBOTCAST_TRANSCRIBE_ENV=robotcast-faster-whisper-gpu
+ROBOTCAST_TRANSCRIBE_INFERENCE_BATCH=4
+ROBOTCAST_TRANSCRIBE_COMPUTE_TYPE=float16
+```
+
+Episodes with an available publisher transcript or completed local transcript
+are never sent to ASR. A publisher `no_subtitle` result is eligible for local
+transcription; failed ASR attempts are retried after one day.
+
 Get a concise database/queue/site snapshot (or JSON for monitoring):
 
 ```bash

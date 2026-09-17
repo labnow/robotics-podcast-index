@@ -9,6 +9,7 @@ robotcast = "robotcast.cli:main"
 
 [project.optional-dependencies]
 transcribe = ["openai-whisper>=20250625"]
+faster-transcribe = ["faster-whisper==1.2.1"]
 
 [build-system]
 requires = ["setuptools>=68"]

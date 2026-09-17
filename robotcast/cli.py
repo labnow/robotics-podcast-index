@@ -135,6 +135,13 @@ def parser() -> argparse.ArgumentParser:
     transcribe.add_argument("--directory", type=Path, default=Path(".robotcast/transcripts"))
     transcribe.add_argument("--worker-id", default=f"{socket.gethostname()}-{os.getpid()}")
     transcribe.add_argument("--lease-minutes", type=int, default=360)
+    transcribe.add_argument("--backend", choices=["openai-whisper", "faster-whisper"],
+                            default="openai-whisper")
+    transcribe.add_argument("--batch-size", type=int, default=4)
+    transcribe.add_argument("--compute-type", default="float16")
+    release_claims = sub.add_parser("release-transcription-claims",
+                                    help="Release leases owned by a stopped worker")
+    release_claims.add_argument("--worker-id", required=True)
     queue = sub.add_parser("transcription-queue",
                            help="Preview prioritized transcript-aware eligibility")
     queue.add_argument("--limit", type=int, default=20)
@@ -353,8 +360,13 @@ def main() -> None:
         report = transcribe_public_audio(conn, args.directory, args.max_episodes,
             args.episode_id, args.model, args.device, args.fp16, args.language,
             args.max_duration_seconds, args.request_interval, args.worker_id,
-            args.lease_minutes)
+            args.lease_minutes, args.backend, args.batch_size, args.compute_type)
         print("Local transcription: " + ", ".join(f"{k}={v}" for k, v in report.items()))
+    elif args.command == "release-transcription-claims":
+        cursor = conn.execute("DELETE FROM transcription_claims WHERE worker_id=?",
+                              (args.worker_id,))
+        conn.commit()
+        print(f"Released {cursor.rowcount} transcription claim(s) for {args.worker_id}")
     elif args.command == "transcription-queue":
         rows = transcription_candidates(conn, args.limit, args.episode_id,
                                         args.max_duration_seconds)
