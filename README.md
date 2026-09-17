@@ -40,14 +40,14 @@ scripts/install_background_services.sh
 scripts/robotcast_service.sh status
 ```
 
-Transcription uses OpenAI Whisper `large-v3`, CUDA, FP16, and physical GPU 1:
+Production transcription uses faster-whisper `large-v3`, CUDA, FP16, batch 4,
+and physical GPU 1 during daytime. OpenAI Whisper remains available as a fallback:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 python -m robotcast transcribe --max-episodes 1
 ```
 
-Faster-whisper FP16 batch-4 is available as an isolated optional backend. Switch
-between daytime GPU 1 and nighttime dual-GPU operation with
+Switch between daytime GPU 1 and nighttime dual-GPU operation with
 `scripts/transcription_mode.sh one|two`; see the operations guide for setup.
 
 Build and validate locally; publication remains explicit:
