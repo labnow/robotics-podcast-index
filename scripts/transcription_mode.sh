@@ -6,6 +6,7 @@ case "$mode" in
   one)
     systemctl --user disable --now robotcast-transcribe@0.timer
     systemctl --user stop robotcast-transcribe@0.service
+    systemctl --user reset-failed robotcast-transcribe@0.service || true
     systemctl --user enable --now robotcast-transcribe@1.timer
     systemctl --user start --no-block robotcast-transcribe@1.service
     ;;
@@ -16,6 +17,7 @@ case "$mode" in
   off)
     systemctl --user disable --now robotcast-transcribe@0.timer robotcast-transcribe@1.timer
     systemctl --user stop robotcast-transcribe@0.service robotcast-transcribe@1.service
+    systemctl --user reset-failed robotcast-transcribe@0.service robotcast-transcribe@1.service || true
     ;;
   status)
     systemctl --user is-enabled robotcast-transcribe@0.timer robotcast-transcribe@1.timer || true
