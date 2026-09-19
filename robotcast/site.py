@@ -16,6 +16,7 @@ EPISODE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 BLOCKED_NAMES = {"robotics_podcasts.db", ".robotcast", "refresh_token",
                  "classify.lock", "transcribe.lock"}
 CHUNK_SIZE = 50
+SITE_EPISODE_LIMIT = 1000
 
 
 def _clean_html(value: str | None, max_chars: int | None = None) -> str:
@@ -51,7 +52,8 @@ def _rows(conn):
       WHERE e.relevance_score>=2 AND {score}>={policy['minimum']}
         AND (e.play_count IS NULL OR e.play_count>0)
       GROUP BY e.episode_id
-      ORDER BY {score} DESC,e.published_at DESC,e.title""",
+      ORDER BY {score} DESC,e.published_at DESC,e.title
+      LIMIT {SITE_EPISODE_LIMIT}""",
       (RUBRIC_VERSION, RUBRIC_VERSION)).fetchall()
 
 

@@ -1,0 +1,17 @@
+[Unit]
+Description=Drain transcript-aware quality backlog, publish, and re-arm weekly publication
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@PROJECT_DIR@
+Environment=PATH=@CONDA_DIR@:@CODEX_DIR@:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=-%h/.config/robotcast/robotcast.env
+ExecStart=@PROJECT_DIR@/scripts/background_worker.sh quality-backfill
+ExecStart=/usr/bin/systemctl --user start robotcast-main@publish.service
+ExecStart=/usr/bin/systemctl --user enable --now robotcast-main-publish.timer
+Nice=10
+Restart=on-failure
+RestartSec=5min

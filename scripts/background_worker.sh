@@ -31,6 +31,12 @@ case "$worker" in
       --max-episodes "${ROBOTCAST_CLASSIFY_BATCH:-100}" \
       --batch-size 5 --workers "${ROBOTCAST_CLASSIFY_WORKERS:-2}"
     ;;
+  quality-backfill)
+    exec conda run --no-capture-output -n robotcast-whisper-gpu \
+      python -m robotcast --db "$database_path" score-quality --all \
+      --max-episodes "${ROBOTCAST_QUALITY_BACKFILL_MAX:-10000}" \
+      --batch-size "${ROBOTCAST_QUALITY_BATCH_SIZE:-5}" --transcripts-only
+    ;;
   release-transcription-claim)
     gpu="${instance:?GPU instance is required}"
     exec conda run --no-capture-output -n robotcast-whisper-gpu \
@@ -38,7 +44,7 @@ case "$worker" in
       --worker-id "gpu-$gpu"
     ;;
   *)
-    printf 'Usage: %s {transcribe|classify|release-transcription-claim} [GPU]\n' "$0" >&2
+    printf 'Usage: %s {transcribe|classify|quality-backfill|release-transcription-claim} [GPU]\n' "$0" >&2
     exit 2
     ;;
 esac

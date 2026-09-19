@@ -2,7 +2,7 @@
 Description=Assess new transcripts and refresh Robotcast Pages
 
 [Timer]
-OnCalendar=Sun *-*-* 04:00:00
+OnUnitInactiveSec=1w
 RandomizedDelaySec=2h
 Persistent=true
 Unit=robotcast-main@publish.service

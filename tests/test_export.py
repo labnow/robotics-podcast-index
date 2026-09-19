@@ -6,7 +6,7 @@ from pathlib import Path
 from robotcast.db import connect, install_seeds, upsert_episode
 from robotcast.export import export_csv
 from robotcast.intelligence import pending_batch, validate_and_import
-from robotcast.site import build_site, validate_site
+from robotcast.site import SITE_EPISODE_LIMIT, build_site, validate_site
 from robotcast.quality_policy import (HYBRID_VERSION, activate_quality_v2,
                                       quality_sql, rollback_quality,
                                       set_quality_override)
@@ -60,6 +60,9 @@ class ExportTests(unittest.TestCase):
             detail = __import__("json").loads((output / "data/details/episode-1.json").read_text())
             self.assertEqual(detail["description"], "深入讨论。")
             self.assertEqual(validate_site(output)["episodes"], 1)
+
+    def test_site_episode_limit_is_one_thousand(self):
+        self.assertEqual(SITE_EPISODE_LIMIT, 1000)
 
     def test_quality_measure_switch_and_rollback_are_versioned(self):
         with tempfile.TemporaryDirectory() as directory:
