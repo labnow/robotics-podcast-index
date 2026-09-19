@@ -35,6 +35,7 @@ case "$worker" in
     exec conda run --no-capture-output -n robotcast-whisper-gpu \
       python -m robotcast --db "$database_path" score-quality --all \
       --max-episodes "${ROBOTCAST_QUALITY_BACKFILL_MAX:-10000}" \
+      --workers "${ROBOTCAST_QUALITY_WORKERS:-2}" \
       --batch-size "${ROBOTCAST_QUALITY_BATCH_SIZE:-5}" --transcripts-only
     ;;
   release-transcription-claim)

@@ -2,6 +2,8 @@
 Description=Assess new transcripts and refresh Robotcast Pages
 
 [Timer]
+# Seed the first run when the timer is newly installed or re-enabled.
+OnActiveSec=1w
 OnUnitInactiveSec=1w
 RandomizedDelaySec=2h
 Persistent=true

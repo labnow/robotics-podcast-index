@@ -14,6 +14,9 @@
   jitter.
 - `robotcast-quality-backfill`: resumably drain the current transcript-aware quality
   backlog, publish only after it is empty, and then re-arm weekly publication.
+  Uses two concurrent requests of five episodes each, configurable with
+  `ROBOTCAST_QUALITY_WORKERS`. A single coordinator selects distinct batches and
+  saves results; completed batches survive failures and service restarts.
 
 Install or refresh the user units with:
 

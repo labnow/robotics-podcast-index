@@ -61,6 +61,25 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(detail["description"], "深入讨论。")
             self.assertEqual(validate_site(output)["episodes"], 1)
 
+    def test_site_upgrades_legacy_http_episode_urls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            conn = connect(Path(directory) / "test.db")
+            install_seeds(conn, {"core": ["机器人"]})
+            upsert_episode(conn, {"eid": "legacy-http", "title": "机器人访谈",
+                                  "playCount": 10}, "机器人")
+            conn.execute("""UPDATE episodes SET relevance_score=3,quality_score=3,
+              url='http://example.com/episode' WHERE episode_id='legacy-http'""")
+            conn.execute("""INSERT INTO episode_classifications
+              (episode_id,content_hash,relevance_score,topics_json,
+               suggested_keywords_json,reason,classifier,quality_score,quality_reason)
+              VALUES('legacy-http','hash',3,'[]','[]','Relevant','test',3,'Good')""")
+            conn.commit()
+            output = Path(directory) / "site"
+            build_site(conn, output)
+            payload = __import__("json").loads((output / "data/index.json").read_text())
+            episodes = __import__("json").loads((output / payload["chunks"][0]).read_text())
+            self.assertEqual(episodes[0]["url"], "https://example.com/episode")
+
     def test_site_episode_limit_is_one_thousand(self):
         self.assertEqual(SITE_EPISODE_LIMIT, 1000)
 

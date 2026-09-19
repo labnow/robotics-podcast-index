@@ -91,6 +91,8 @@ def parser() -> argparse.ArgumentParser:
     quality = sub.add_parser("score-quality",
                              help="Apply the versioned 0-10 intrinsic-quality rubric")
     quality.add_argument("--batch-size", type=int, default=5)
+    quality.add_argument("--workers", type=int, default=1,
+                         help="Concurrent quality requests, each with batch-size episodes")
     quality.add_argument("--model", default="gpt-5.6-luna")
     quality.add_argument("--reasoning-effort", default="low",
                          choices=["minimal", "low", "medium", "high", "xhigh", "max"])
@@ -304,7 +306,8 @@ def main() -> None:
                     break
                 batch_size = min(batch_size, remaining)
             count = run_quality(conn, batch_size, args.model, args.reasoning_effort,
-                                args.episode_id, args.transcripts_only)
+                                args.episode_id, args.transcripts_only, args.workers,
+                                None if args.max_episodes is None else remaining)
             total += count
             if args.all and count:
                 print(f"Scored quality batch of {count}; total this run: {total}",

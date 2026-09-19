@@ -26,6 +26,14 @@ def _clean_html(value: str | None, max_chars: int | None = None) -> str:
     return cleaned
 
 
+def _public_url(value: str | None) -> str:
+    """Return a browser-safe public URL, upgrading legacy HTTP links."""
+    parsed = urlparse(value or "")
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("episode URL is not public HTTP(S)")
+    return parsed._replace(scheme="https").geturl()
+
+
 def _inside(root: Path, candidate: Path) -> Path:
     root = root.resolve()
     candidate = candidate.resolve()
@@ -51,6 +59,7 @@ def _rows(conn):
       LEFT JOIN episode_matches m USING(episode_id)
       WHERE e.relevance_score>=2 AND {score}>={policy['minimum']}
         AND (e.play_count IS NULL OR e.play_count>0)
+        AND (e.url LIKE 'https://%' OR e.url LIKE 'http://%')
       GROUP BY e.episode_id
       ORDER BY {score} DESC,e.published_at DESC,e.title
       LIMIT {SITE_EPISODE_LIMIT}""",
@@ -86,7 +95,7 @@ def build_site(conn, output: Path) -> dict:
             "relevance": row["relevance_score"], "quality": row["active_quality"],
             "qualityConfidence": row["active_quality_confidence"],
             "qualityEvidence": row["active_quality_evidence"],
-            "topics": topics, "url": row["url"],
+            "topics": topics, "url": _public_url(row["url"]),
         })
         detail = {
             "description": _clean_html(row["description"], 500),

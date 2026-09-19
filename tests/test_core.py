@@ -14,7 +14,7 @@ from robotcast.eligibility import (claim_transcription_candidate,
 from robotcast.intelligence import pending_batch, validate_and_import
 from robotcast.quality import (RUBRIC_VERSION, calculate_quality,
                                calibration_report, ensure_calibration_sample,
-                               pending_quality_batch,
+                               pending_quality_batch, run_quality,
                                validate_and_import as import_quality)
 from robotcast.transcripts import fetch_public_transcripts
 from robotcast.matching import duration_close, normalize_title
@@ -400,6 +400,37 @@ class CoreTests(unittest.TestCase):
         second = ensure_calibration_sample(self.conn, "test")
         self.assertEqual((first, second), (3, 3))
         self.assertEqual(calibration_report(self.conn, "test")["selected"], 3)
+
+    def test_parallel_quality_distinct_batches_cap_and_failure_resume(self):
+        import threading
+        install_seeds(self.conn, {"core": ["机器人"]})
+        for i in range(5):
+            upsert_episode(self.conn, {"eid": f"parallel-{i}", "title": f"机器人{i}",
+                                      "playCount": 10}, "机器人")
+        self.conn.execute("UPDATE episodes SET relevance_score=3,quality_score=3")
+        self.conn.commit()
+        barrier = threading.Barrier(2)
+        seen = []
+
+        def request(batch, model, effort):
+            seen.extend(item["episode_id"] for item in batch)
+            barrier.wait(timeout=5)
+            if len(batch) == 1:
+                raise RuntimeError("temporary failure")
+            return {"assessments": [{
+                "request_id": item["request_id"],
+                "dimensions": dict.fromkeys(
+                    ["depth", "specificity", "expertise", "originality", "structure"], 2),
+                "flags": [], "confidence": 2, "reason": "Evidence."} for item in batch]}
+
+        with mock.patch("robotcast.quality.shutil.which", return_value="codex"), \
+             mock.patch("robotcast.quality._request_quality", side_effect=request):
+            with self.assertRaisesRegex(RuntimeError, "temporary failure"):
+                run_quality(self.conn, batch_size=2, workers=2, max_episodes=3)
+        self.assertEqual(len(seen), 3)
+        self.assertEqual(len(set(seen)), 3)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM quality_assessments").fetchone()[0], 2)
+        self.assertEqual(len(pending_quality_batch(self.conn, 10)), 3)
 
     def test_versioned_quality_assessment_import(self):
         install_seeds(self.conn, {"core": ["机器人"]})

@@ -295,12 +295,42 @@ def validate_and_import(conn, batch: list[dict], result: dict, classifier: str) 
 def run_quality(conn, batch_size: int = 5, model: str = "gpt-5.6-luna",
                 reasoning_effort: str = "low",
                 episode_ids: list[str] | None = None,
-                transcripts_only: bool = False) -> int:
+                transcripts_only: bool = False, workers: int = 1,
+                max_episodes: int | None = None) -> int:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if batch_size < 1 or workers < 1:
+        raise ValueError("batch_size and workers must be positive")
     if not shutil.which("codex"):
         raise RuntimeError("codex executable was not found on PATH")
-    batch = pending_quality_batch(conn, batch_size, episode_ids, transcripts_only)
-    if not batch:
+    limit = batch_size * workers
+    if max_episodes is not None:
+        limit = min(limit, max_episodes)
+    if limit <= 0:
         return 0
+    pending = pending_quality_batch(conn, limit, episode_ids, transcripts_only)
+    if not pending:
+        return 0
+    # Select distinct episodes once; only the coordinator reads/writes SQLite.
+    batches = [pending[i:i + batch_size] for i in range(0, len(pending), batch_size)]
+    imported = 0
+    errors = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_request_quality, batch, model, reasoning_effort): batch
+                   for batch in batches}
+        for future in as_completed(futures):
+            try:
+                imported += validate_and_import(
+                    conn, futures[future], future.result(),
+                    f"codex-exec:{model}:{reasoning_effort}")
+            except Exception as exc:
+                errors.append(exc)
+    if errors:
+        raise errors[0]
+    return imported
+
+
+def _request_quality(batch: list[dict], model: str, reasoning_effort: str) -> dict:
     with tempfile.TemporaryDirectory(prefix="robotcast-quality-") as directory:
         root = Path(directory)
         schema_path, output_path = root / "schema.json", root / "result.json"
@@ -315,5 +345,4 @@ def run_quality(conn, batch_size: int = 5, model: str = "gpt-5.6-luna",
             diagnostic = "\n".join(completed.stderr.splitlines()[-12:])
             raise RuntimeError(f"codex exec quality assessment failed:\n{diagnostic}")
         result = json.loads(output_path.read_text(encoding="utf-8"))
-    return validate_and_import(
-        conn, batch, result, f"codex-exec:{model}:{reasoning_effort}")
+    return result
